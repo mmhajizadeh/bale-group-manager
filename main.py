@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import time
 from telegram.ext import MessageHandler, filters
+from telegram import Update, ChatPermissions
 
 # بارگذاری متغیرهای محیطی از فایل .env
 load_dotenv()
@@ -56,6 +57,19 @@ async def save_bot_message(chat_id, message_id):
         await conn.close()
     except Exception as e:
         logging.error(f"Failed to save bot message: {e}")
+
+# تابع کمکی برای پیدا کردن آیدی عددی کاربر از روی یوزرنیم
+async def get_user_id_by_username(username):
+    username = username.replace('@', '')
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        # پیدا کردن اولین پیامی که این کاربر داده و استخراج آیدی آن
+        user_id = await conn.fetchval('SELECT user_id FROM messages WHERE username = $1 LIMIT 1', username)
+        await conn.close()
+        return user_id
+    except Exception as e:
+        logging.error(f"Error fetching user_id: {e}")
+        return None
 
 # هندلر دستور /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,6 +316,135 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_msg = await update.message.reply_text("❌ خطایی در گرفتن آمار رخ داد.")
         await save_bot_message(chat_id, bot_msg.message_id)
 
+# هندلر میوت کردن کاربر (سکوت اجباری)
+async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    if update.effective_user.id not in ALLOWED_USERS:
+        bot_msg = await update.message.reply_text("⛔ شما دسترسی لازم برای این دستور را ندارید.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
+    # بررسی فرمت (حداقل یک کلمه برای یوزرنیم باید باشد)
+    if len(context.args) < 1:
+        bot_msg = await update.message.reply_text("❌ فرمت اشتباه است. مثال: /mute @username 2 (عدد به ساعت)")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
+    target_username = context.args[0]
+    user_id = await get_user_id_by_username(target_username)
+    
+    if not user_id:
+        bot_msg = await update.message.reply_text("❌ کاربر در دیتابیس یافت نشد (باید حداقل یک پیام داده باشد).")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
+    # محاسبه زمان سکوت (پیش‌فرض 24 ساعت)
+    hours = 24
+    if len(context.args) > 1 and context.args[1].isdigit():
+        hours = int(context.args[1])
+        if hours > 24:
+            hours = 24
+
+    # محاسبه زمان پایان محدودیت به ثانیه (Unix Timestamp)
+    until_date = int(time.time()) + (hours * 3600)
+
+    try:
+        # اعمال محدودیت: قابلیت ارسال پیام False می‌شود
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until_date
+        )
+        bot_msg = await update.message.reply_text(f"✅ کاربر {target_username} برای {hours} ساعت سکوت شد.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+    except Exception as e:
+        logging.error(f"Error in mute: {e}")
+        bot_msg = await update.message.reply_text("❌ خطا! آیا ربات دسترسی 'محدود کردن اعضا' را در گروه دارد؟")
+        await save_bot_message(chat_id, bot_msg.message_id)
+
+# هندلر بستن قابلیت ارسال گیف، استیکر و رسانه
+async def ban_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    if update.effective_user.id not in ALLOWED_USERS:
+        bot_msg = await update.message.reply_text("⛔ شما دسترسی لازم را ندارید.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
+    if len(context.args) < 1:
+        bot_msg = await update.message.reply_text("❌ فرمت اشتباه است. مثال: /ban_media @username")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
+    target_username = context.args[0]
+    user_id = await get_user_id_by_username(target_username)
+    
+    if not user_id:
+        bot_msg = await update.message.reply_text("❌ کاربر در دیتابیس یافت نشد.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
+    try:
+        # فقط اجازه ارسال متن می‌دهیم و بقیه موارد (عکس، فیلم، استیکر و گیف) مسدود می‌شوند
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_other_messages=False # این گزینه استیکر و گیف را مسدود می‌کند
+            )
+        )
+        bot_msg = await update.message.reply_text(f"✅ ارسال رسانه، استیکر و گیف برای کاربر {target_username} مسدود شد.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+    except Exception as e:
+        logging.error(f"Error in ban_media: {e}")
+        bot_msg = await update.message.reply_text("❌ خطا در اعمال محدودیت رسانه.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+
+# هندلر رفع محدودیت (آن‌میوت کردن)
+async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    if update.effective_user.id not in ALLOWED_USERS:
+        return
+
+    if len(context.args) < 1:
+        return
+
+    target_username = context.args[0]
+    user_id = await get_user_id_by_username(target_username)
+    
+    if not user_id:
+        bot_msg = await update.message.reply_text("❌ کاربر در دیتابیس یافت نشد.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
+    try:
+        # تمام دسترسی‌ها را آزاد می‌کنیم
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        )
+        bot_msg = await update.message.reply_text(f"✅ تمام محدودیت‌های کاربر {target_username} برداشته شد و اکنون آزاد است.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+    except Exception as e:
+        logging.error(f"Error in unmute: {e}")
+
 # بدنه اصلی برنامه
 if __name__ == '__main__':
     # ساخت اپلیکیشن با توکن و بیس‌ یوآرال بله
@@ -318,6 +461,9 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("delete_last", delete_last))
     application.add_handler(CommandHandler("delete_user", delete_user))
     application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("mute", mute_user))
+    application.add_handler(CommandHandler("ban_media", ban_media))
+    application.add_handler(CommandHandler("unmute", unmute_user))
 
     # اجرای ربات روی سیستم شما
     logging.info("Starting bot in polling mode. Press Ctrl+C to stop.")
