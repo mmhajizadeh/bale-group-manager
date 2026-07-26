@@ -73,6 +73,10 @@ async def post_init(application):
 ghaleb_last_reply = {}
 
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ۱. جلوگیری از خطای AttributeError در صورت خالی بودن update.message (مثلا هنگام ادیت پیام)
+    if not update.message or not update.effective_chat or not update.effective_user:
+        return
+
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
@@ -86,7 +90,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ۲. ذخیره پیام در دیتابیس
     try:
         conn = await asyncpg.connect(DATABASE_URL)
-        # استفاده از 1$ و 2$ برای جلوگیری از باگ‌های امنیتی (SQL Injection) است
         await conn.execute('''
             INSERT INTO messages (chat_id, user_id, username, message_id)
             VALUES ($1, $2, $3, $4)
@@ -96,21 +99,21 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Database insertion failed: {e}")
 
-    # ۳. بررسی کلمه "غالب" و اعمال محدودیت ۳۰ ثانیه‌ای
+    # ۳. بررسی کلمه "غالب" و اعمال محدودیت زمانی
     if "غالب" in text:
         current_time = time.time()
-        # گرفتن زمان آخرین درخواست کاربر، اگر نبود 0 در نظر می‌گیریم
         last_time = ghaleb_last_reply.get(user_id, 0) 
         
-        if current_time - last_time > 20: # اگر بیشتر از ۳۰ ثانیه گذشته بود
-            # Reply به همون پیامی که توش نوشته "غالب"
-            bot_message = await update.message.reply_text("بله در خدمتم", reply_to_message_id=message_id)
-            
-            # آیدی این پیام را به دیتابیس می‌فرستیم
-            await save_bot_message(chat_id, bot_message.message_id)
-                    
-            # بروزرسانی زمان آخرین درخواست این کاربر
-            ghaleb_last_reply[user_id] = current_time
+        if current_time - last_time > 20: 
+            try:
+                # Reply به پیامی که توش نوشته "غالب"
+                bot_message = await update.message.reply_text("بله در خدمتم", reply_to_message_id=message_id)
+                # آیدی پیام ربات را به دیتابیس می‌فرستیم
+                await save_bot_message(chat_id, bot_message.message_id)
+                # بروزرسانی زمان آخرین درخواست این کاربر
+                ghaleb_last_reply[user_id] = current_time
+            except Exception as e:
+                logging.error(f"Failed to send 'ghaleb' reply: {e}")
 
 # هندلر شمارش کل پیام‌های گروه
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
