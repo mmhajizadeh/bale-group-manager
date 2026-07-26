@@ -60,11 +60,10 @@ async def save_bot_message(chat_id, message_id):
 
 # تابع کمکی برای پیدا کردن آیدی عددی کاربر از روی یوزرنیم
 async def get_user_id_by_username(username):
-    username = username.replace('@', '')
+    username = username.replace('@', '').lower()
     try:
         conn = await asyncpg.connect(DATABASE_URL)
-        # پیدا کردن اولین پیامی که این کاربر داده و استخراج آیدی آن
-        user_id = await conn.fetchval('SELECT user_id FROM messages WHERE username = $1 LIMIT 1', username)
+        user_id = await conn.fetchval('SELECT user_id FROM messages WHERE chat_id = $1 AND LOWER(username) = $2 LIMIT 1', username)
         await conn.close()
         return user_id
     except Exception as e:
@@ -95,7 +94,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     # اگر کاربر یوزرنیم نداشت، نام اولش رو می‌گیریم
-    username = update.effective_user.username or update.effective_user.first_name 
+    username = (update.effective_user.username or update.effective_user.first_name).lower() 
     message_id = update.message.message_id
     
     # متن پیام (اگر استیکر یا عکس باشه، متن خالی در نظر گرفته میشه)
@@ -152,11 +151,11 @@ async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # اگر کاربر جلوی دستور چیزی نوشته بود (مثلا /count_user @ali)
     if context.args:
         # حذف کاراکتر @ در صورت وجود
-        target_username = context.args[0].replace('@', '') 
+        target_username = context.args[0].replace('@', '').lower()
         try:
             conn = await asyncpg.connect(DATABASE_URL)
             count = await conn.fetchval(
-                'SELECT COUNT(*) FROM messages WHERE chat_id = $1 AND username = $2', 
+                'SELECT COUNT(*) FROM messages WHERE chat_id = $1 AND LOWER(username) = $2', 
                 chat_id, target_username
             )
             await conn.close()
@@ -244,7 +243,7 @@ async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_bot_message(chat_id, bot_msg.message_id)
         return
         
-    target_username = context.args[0].replace('@', '')
+    target_username = context.args[0].replace('@', '').lower()
     limit = int(context.args[1])
     if limit > 1000:
         limit = 1000
@@ -253,7 +252,7 @@ async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn = await asyncpg.connect(DATABASE_URL)
         records = await conn.fetch('''
             SELECT id, message_id FROM messages 
-            WHERE chat_id = $1 AND username = $2
+            WHERE chat_id = $1 AND LOWER(username) = $2
             ORDER BY timestamp DESC, id DESC LIMIT $3
         ''', chat_id, target_username, limit)
         
