@@ -501,10 +501,7 @@ if __name__ == '__main__':
 
     # اضافه کردن دستورات به ربات
     application.add_handler(CommandHandler("start", start))
-
-    # این خط به ربات میگه: تمام پیام‌های متنی که با اسلش (دستور) شروع نمیشن رو بفرست به handle_messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
-
     application.add_handler(CommandHandler("count_group", count_group))
     application.add_handler(CommandHandler("count_user", count_user))
     application.add_handler(CommandHandler("delete_last", delete_last))
@@ -514,6 +511,20 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("ban_media", ban_media))
     application.add_handler(CommandHandler("unmute", unmute_user))
 
-    # اجرای ربات روی سیستم شما
-    logging.info("Starting bot in polling mode. Press Ctrl+C to stop.")
-    application.run_polling()
+    # تعیین محیط اجرا (لوکال یا سرور) با چک کردن متغیر WEBHOOK_URL
+    WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+
+    if WEBHOOK_URL:
+        # حالت سرور (اجرا روی Render)
+        PORT = int(os.environ.get('PORT', 10000))
+        logging.info(f"Starting bot in WEBHOOK mode on port {PORT}")
+        application.run_webhook(
+            listen='0.0.0.0',
+            port=PORT,
+            webhook_url=f"{WEBHOOK_URL}/webhook",
+            url_path='webhook'
+        )
+    else:
+        # حالت لوکال (اجرا روی سیستم شما)
+        logging.info("Starting bot in POLLING mode. Press Ctrl+C to stop.")
+        application.run_polling()
