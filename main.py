@@ -119,7 +119,7 @@ async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await conn.close()
             
-            await update.message.reply_text(f"👤 تعداد پیام‌های @{target_username} در این گروه: {count}")
+            await update.message.reply_text(f"👤 تعداد پیام‌ های @{target_username} در این گروه: {count}")
         except Exception as e:
             logging.error(f"Error in count_user (target): {e}")
             
@@ -134,9 +134,85 @@ async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await conn.close()
             
-            await update.message.reply_text(f"👤 شما تا به حال {count} پیام در این گروه ارسال کرده‌اید.")
+            await update.message.reply_text(f"👤 شما تا به حال {count} پیام در این گروه ارسال کرده‌ اید.")
         except Exception as e:
             logging.error(f"Error in count_user (self): {e}")
+
+# هندلر حذف N پیام آخر گروه
+async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    # بررسی اینکه آیا کاربر تعداد را وارد کرده یا نه (مثلا /delete_last 10)
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("❌ لطفاً تعداد پیام را وارد کنید. مثال: /delete_last 10")
+        return
+        
+    limit = int(context.args[0])
+    if limit > 1000:
+        limit = 1000 # اعمال محدودیت ۱۰۰۰ تایی طبق مستندات
+        
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        # گرفتن آیدی پیام‌ های آخر گروه به ترتیب زمان (جدیدترین‌ها)
+        records = await conn.fetch('''
+            SELECT id, message_id FROM messages 
+            WHERE chat_id = $1 
+            ORDER BY timestamp DESC, id DESC LIMIT $2
+        ''', chat_id, limit)
+        
+        deleted_count = 0
+        for record in records:
+            try:
+                # ۱. حذف پیام از گروه بله
+                await context.bot.delete_message(chat_id=chat_id, message_id=record['message_id'])
+                # ۲. حذف پیام از دیتابیس خودمان
+                await conn.execute('DELETE FROM messages WHERE id = $1', record['id'])
+                deleted_count += 1
+            except Exception as e:
+                logging.warning(f"Could not delete message {record['message_id']} from Bale: {e}")
+                
+        await conn.close()
+        await update.message.reply_text(f"✅ تعداد {deleted_count} پیام آخر گروه با موفقیت حذف شد.")
+    except Exception as e:
+        logging.error(f"Error in delete_last: {e}")
+        await update.message.reply_text("❌ خطایی رخ داد. آیا من در گروه ادمین هستم؟")
+
+# هندلر حذف N پیام آخر یک کاربر خاص
+async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    # بررسی ورودی‌ها (باید حداقل ۲ کلمه باشد: یوزرنیم و تعداد)
+    if len(context.args) < 2 or not context.args[1].isdigit():
+        await update.message.reply_text("❌ فرمت اشتباه است. مثال: /delete_user @mmhajizadeh 5")
+        return
+        
+    target_username = context.args[0].replace('@', '')
+    limit = int(context.args[1])
+    if limit > 1000:
+        limit = 1000
+        
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        records = await conn.fetch('''
+            SELECT id, message_id FROM messages 
+            WHERE chat_id = $1 AND username = $2
+            ORDER BY timestamp DESC, id DESC LIMIT $3
+        ''', chat_id, target_username, limit)
+        
+        deleted_count = 0
+        for record in records:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=record['message_id'])
+                await conn.execute('DELETE FROM messages WHERE id = $1', record['id'])
+                deleted_count += 1
+            except Exception as e:
+                logging.warning(f"Could not delete message {record['message_id']} from Bale: {e}")
+                
+        await conn.close()
+        await update.message.reply_text(f"✅ تعداد {deleted_count} پیام آخر از کاربر @{target_username} حذف شد.")
+    except Exception as e:
+        logging.error(f"Error in delete_user: {e}")
+        await update.message.reply_text("❌ خطایی رخ داد.")
 
 # بدنه اصلی برنامه
 if __name__ == '__main__':
@@ -151,6 +227,9 @@ if __name__ == '__main__':
 
     application.add_handler(CommandHandler("count_group", count_group))
     application.add_handler(CommandHandler("count_user", count_user))
+
+    application.add_handler(CommandHandler("delete_last", delete_last))
+    application.add_handler(CommandHandler("delete_user", delete_user))
 
     # اجرای ربات روی سیستم شما
     logging.info("Starting bot in polling mode. Press Ctrl+C to stop.")
