@@ -7,6 +7,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import time
 from telegram.ext import MessageHandler, filters
 from telegram import Update, ChatPermissions
+from groq import AsyncGroq
 
 # بارگذاری متغیرهای محیطی از فایل .env
 load_dotenv()
@@ -19,6 +20,10 @@ logging.basicConfig(
 # دریافت اطلاعات از فایل .env
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 DATABASE_URL = os.getenv('DATABASE_URL')
+AI_API_KEY = os.getenv('AI_API_KEY')
+
+# راه‌اندازی کلاینت Groq
+groq_client = AsyncGroq(api_key=AI_API_KEY)
 
 ALLOWED_USERS = [1514414705, 941154813, 1219981601]
 
@@ -117,21 +122,49 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Database insertion failed: {e}")
 
-    # ۳. بررسی کلمه "غالب" و اعمال محدودیت زمانی
-    if text == "غالب":
-        current_time = time.time()
-        last_time = ghaleb_last_reply.get(user_id, 0) 
-        
-        if current_time - last_time > 20: 
-            try:
-                # Reply به پیامی که توش نوشته "غالب"
-                bot_message = await update.message.reply_text("بله در خدمتم", reply_to_message_id=message_id)
-                # آیدی پیام ربات را به دیتابیس می‌فرستیم
-                await save_bot_message(chat_id, bot_message.message_id)
-                # بروزرسانی زمان آخرین درخواست این کاربر
-                ghaleb_last_reply[user_id] = current_time
-            except Exception as e:
-                logging.error(f"Failed to send 'ghaleb' reply: {e}")
+    # ۳. بررسی هوش مصنوعی (سانسور و پاسخ هوشمند)
+    if text:
+        try:
+            # تعریف شخصیت و قوانین برای مدل
+            system_prompt = """تو یک دستیار هوشمند، مودب و ناظر امنیتی گروه چت غالبون هستی.
+            فقط یکی از سه کار زیر را انجام بده:
+            ۱. اگر متن کاربر حاوی فحاشی، توهین رکیک، کلمات زننده یا نامناسب بود، فقط و فقط بنویس: [DELETE]
+            ۲. اگر پیام توهین نداشت، اما کاربر در متن از کلمه "غالب" استفاده کرده بود یا صراحتاً با تو حرف زده بود، یک جواب کوتاه، جذاب و دوستانه به زبان فارسی بده.
+            ۳. در غیر این صورت (اگر پیام عادی بود و ربطی به تو نداشت)، فقط و فقط بنویس: [PASS]
+            نکته مهم: هیچ توضیح اضافه‌ای نده."""
+
+            completion = await groq_client.chat.completions.create(
+                model="llama3-8b-8192", # مدل بسیار سریع و سبک
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text}
+                ],
+                temperature=0.5,
+                max_tokens=150
+            )
+            
+            ai_response = completion.choices[0].message.content.strip()
+
+            # بررسی تصمیم هوش مصنوعی
+            if "[DELETE]" in ai_response:
+                # پیام حاوی توهین بوده است -> حذف پیام
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                logging.info(f"Message {message_id} from {username} deleted by AI filter.")
+                return # توقف پردازش و خروج
+                
+            elif "[PASS]" not in ai_response:
+                # هوش مصنوعی یک جواب هوشمندانه تولید کرده است
+                current_time = time.time()
+                last_time = ghaleb_last_reply.get(user_id, 0) 
+                
+                # اعمال محدودیت زمانی برای جلوگیری از اسپم شدن ربات (همان ۲۰ ثانیه)
+                if current_time - last_time > 20:
+                    bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
+                    await save_bot_message(chat_id, bot_msg.message_id)
+                    ghaleb_last_reply[user_id] = current_time
+
+        except Exception as e:
+            logging.error(f"AI API Error: {e}")
     
     # چک کردن وضعیت میوت کاربر
     try:
