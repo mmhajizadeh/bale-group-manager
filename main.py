@@ -134,7 +134,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             نکته مهم: هیچ توضیح اضافه‌ای نده."""
 
             completion = await groq_client.chat.completions.create(
-                model="llama3-8b-8192", # مدل بسیار سریع و سبک
+                model="llama-3.1-8b-instant", # مدل بسیار سریع و سبک
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text}
