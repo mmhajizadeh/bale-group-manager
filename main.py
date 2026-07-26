@@ -89,6 +89,55 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # بروزرسانی زمان آخرین درخواست این کاربر
             ghaleb_last_reply[user_id] = current_time
 
+# هندلر شمارش کل پیام‌های گروه
+async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        # شمردن تمام ردیف ‌هایی که آیدی گروهشون با گروه فعلی یکیه
+        count = await conn.fetchval('SELECT COUNT(*) FROM messages WHERE chat_id = $1', chat_id)
+        await conn.close()
+        
+        await update.message.reply_text(f"📊 تعداد کل پیام‌های ثبت شده گروه تا این لحظه: {count}")
+    except Exception as e:
+        logging.error(f"Error in count_group: {e}")
+        await update.message.reply_text("❌ خطایی در ارتباط با دیتابیس رخ داد.")
+
+# هندلر شمارش پیام‌های یک کاربر (خودش یا شخص دیگر)
+async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    
+    # اگر کاربر جلوی دستور چیزی نوشته بود (مثلا /count_user @ali)
+    if context.args:
+        # حذف کاراکتر @ در صورت وجود
+        target_username = context.args[0].replace('@', '') 
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+            count = await conn.fetchval(
+                'SELECT COUNT(*) FROM messages WHERE chat_id = $1 AND username = $2', 
+                chat_id, target_username
+            )
+            await conn.close()
+            
+            await update.message.reply_text(f"👤 تعداد پیام‌های @{target_username} در این گروه: {count}")
+        except Exception as e:
+            logging.error(f"Error in count_user (target): {e}")
+            
+    # اگر جلوی دستور چیزی نبود (شمارش پیام‌های خودش)
+    else:
+        user_id = update.effective_user.id
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+            count = await conn.fetchval(
+                'SELECT COUNT(*) FROM messages WHERE chat_id = $1 AND user_id = $2', 
+                chat_id, user_id
+            )
+            await conn.close()
+            
+            await update.message.reply_text(f"👤 شما تا به حال {count} پیام در این گروه ارسال کرده‌اید.")
+        except Exception as e:
+            logging.error(f"Error in count_user (self): {e}")
+
 # بدنه اصلی برنامه
 if __name__ == '__main__':
     # ساخت اپلیکیشن با توکن و بیس‌ یوآرال بله
@@ -99,6 +148,9 @@ if __name__ == '__main__':
 
     # این خط به ربات میگه: تمام پیام‌های متنی که با اسلش (دستور) شروع نمیشن رو بفرست به handle_messages
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
+
+    application.add_handler(CommandHandler("count_group", count_group))
+    application.add_handler(CommandHandler("count_user", count_user))
 
     # اجرای ربات روی سیستم شما
     logging.info("Starting bot in polling mode. Press Ctrl+C to stop.")
