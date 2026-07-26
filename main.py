@@ -25,7 +25,6 @@ ALLOWED_USERS = [1514414705, 941154813, 1219981601]
 # آدرس سرور پیام‌ رسان بله
 BALE_BASE_URL = "https://tapi.bale.ai/bot"
 
-# تابع اتصال و ایجاد جدول دیتابیس
 async def init_db():
     logging.info("Connecting to the database...")
     try:
@@ -38,9 +37,15 @@ async def init_db():
                 username TEXT,
                 message_id BIGINT NOT NULL,
                 timestamp TIMESTAMPTZ DEFAULT NOW()
-            )
+            );
+            CREATE TABLE IF NOT EXISTS muted_users (
+                chat_id BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                until_timestamp BIGINT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
+            );
         ''')
-        logging.info("Database 'messages' table initialized successfully.")
+        logging.info("Database tables initialized successfully.")
         await conn.close()
     except Exception as e:
         logging.error(f"Database connection failed: {e}")
@@ -113,7 +118,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Database insertion failed: {e}")
 
     # ۳. بررسی کلمه "غالب" و اعمال محدودیت زمانی
-    if "غالب" in text:
+    if text == "غالب":
         current_time = time.time()
         last_time = ghaleb_last_reply.get(user_id, 0) 
         
@@ -127,6 +132,29 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ghaleb_last_reply[user_id] = current_time
             except Exception as e:
                 logging.error(f"Failed to send 'ghaleb' reply: {e}")
+    
+    # چک کردن وضعیت میوت کاربر
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        muted_until = await conn.fetchval(
+            'SELECT until_timestamp FROM muted_users WHERE chat_id = $1 AND user_id = $2', 
+            chat_id, user_id
+        )
+        await conn.close()
+
+        if muted_until:
+            current_time = int(time.time())
+            if current_time < muted_until:
+                # کاربر هنوز میوت است -> پاک کردن پیام
+                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                return
+            else:
+                # زمان میوت تمام شده -> حذف از دیتابیس
+                conn = await asyncpg.connect(DATABASE_URL)
+                await conn.execute('DELETE FROM muted_users WHERE chat_id = $1 AND user_id = $2', chat_id, user_id)
+                await conn.close()
+    except Exception as e:
+        logging.error(f"Error checking mute status: {e}")
 
 # هندلر شمارش کل پیام‌های گروه
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -324,9 +352,8 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_bot_message(chat_id, bot_msg.message_id)
         return
 
-    # بررسی فرمت (حداقل یک کلمه برای یوزرنیم باید باشد)
     if len(context.args) < 1:
-        bot_msg = await update.message.reply_text("❌ فرمت اشتباه است. مثال: /mute @username 2 (عدد به ساعت)")
+        bot_msg = await update.message.reply_text("❌ فرمت اشتباه است. مثال: /mute @username 2")
         await save_bot_message(chat_id, bot_msg.message_id)
         return
 
@@ -334,33 +361,33 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = await get_user_id_by_username(target_username)
     
     if not user_id:
-        bot_msg = await update.message.reply_text("❌ کاربر در دیتابیس یافت نشد (باید حداقل یک پیام داده باشد).")
+        bot_msg = await update.message.reply_text("❌ کاربر در دیتابیس یافت نشد.")
         await save_bot_message(chat_id, bot_msg.message_id)
         return
 
-    # محاسبه زمان سکوت (پیش‌فرض 24 ساعت)
     hours = 24
     if len(context.args) > 1 and context.args[1].isdigit():
         hours = int(context.args[1])
         if hours > 24:
             hours = 24
 
-    # محاسبه زمان پایان محدودیت به ثانیه (Unix Timestamp)
-    until_date = int(time.time()) + (hours * 3600)
+    until_timestamp = int(time.time()) + (hours * 3600)
 
     try:
-        # اعمال محدودیت: قابلیت ارسال پیام False می‌شود
-        await context.bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=until_date
-        )
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            INSERT INTO muted_users (chat_id, user_id, until_timestamp)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (chat_id, user_id) 
+            DO UPDATE SET until_timestamp = $3
+        ''', chat_id, user_id, until_timestamp)
+        await conn.close()
+
         bot_msg = await update.message.reply_text(f"✅ کاربر {target_username} برای {hours} ساعت سکوت شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
     except Exception as e:
         logging.error(f"Error in mute: {e}")
-        bot_msg = await update.message.reply_text("❌ خطا! آیا ربات دسترسی 'محدود کردن اعضا' را در گروه دارد؟")
+        bot_msg = await update.message.reply_text("❌ خطایی در ثبت سکوت رخ داد.")
         await save_bot_message(chat_id, bot_msg.message_id)
 
 # هندلر بستن قابلیت ارسال گیف، استیکر و رسانه
@@ -425,21 +452,11 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        # تمام دسترسی‌ها را آزاد می‌کنیم
-        await context.bot.restrict_chat_member(
-            chat_id=chat_id,
-            user_id=user_id,
-            permissions=ChatPermissions(
-                can_send_messages=True,
-                can_send_audios=True,
-                can_send_documents=True,
-                can_send_photos=True,
-                can_send_videos=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True
-            )
-        )
-        bot_msg = await update.message.reply_text(f"✅ تمام محدودیت‌های کاربر {target_username} برداشته شد و اکنون آزاد است.")
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('DELETE FROM muted_users WHERE chat_id = $1 AND user_id = $2', chat_id, user_id)
+        await conn.close()
+
+        bot_msg = await update.message.reply_text(f"✅ تمام محدودیت‌های کاربر {target_username} برداشته شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
     except Exception as e:
         logging.error(f"Error in unmute: {e}")
