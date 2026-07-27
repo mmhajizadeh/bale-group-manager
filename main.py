@@ -28,7 +28,10 @@ ALLOWED_USERS = [1514414705, 941154813, 1219981601]
 ghaleb_last_reply = {}
 BALE_BASE_URL = "https://tapi.bale.ai/bot"
 
-# تابع ذخیره پیام‌ها
+# متغیر سراسری برای روشن/خاموش کردن هوش مصنوعی
+ai_enabled = True
+
+# توابع دیتابیس
 async def save_message(user_id, username, chat_id, message_id, text, is_bot=False):
     try:
         supabase_client.table('messages').insert({
@@ -45,7 +48,6 @@ async def save_message(user_id, username, chat_id, message_id, text, is_bot=Fals
 async def save_bot_message(chat_id, message_id):
     await save_message(0, 'Bot', chat_id, message_id, '', is_bot=True)
 
-# دریافت آیدی از روی یوزرنیم
 async def get_user_id_by_username(username):
     username = username.replace('@', '').lower()
     try:
@@ -57,12 +59,56 @@ async def get_user_id_by_username(username):
         logging.error(f"Error fetching user_id: {e}")
         return None
 
+# هندلرهای پایه‌ای
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user.first_name
-    bot_message = await update.message.reply_text(f"🤖 سلام {user}! ربات مدیریت با دیتابیس جدید با موفقیت راه‌ اندازی شد.")
+    bot_message = await update.message.reply_text(f"🤖 سلام {user}! من غالب هستم؛ ربات هوشمند مدیریت گروه. برای دیدن راهنما /help را بزن.")
     await save_bot_message(chat_id, bot_message.message_id)
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    help_text = """
+📚 **راهنمای بازوی غالب:**
+
+🔹 **دستورات عمومی:**
+/start - شروع کار با ربات
+/stats - نمایش ۵ کاربر برتر و آمار کل پیام‌ها
+/count_group - شمارش کل پیام‌های گروه
+/count_user - تعداد پیام‌های شما (یا کاربری خاص: `/count_user @id`)
+
+🔸 **دستورات ادمین:**
+/mute [username] [hours] - سکوت کاربر برای زمان مشخص
+/unmute [username] - رفع سکوت کاربر
+/ban_media [username] - بستن ارسال عکس/فیلم/استیکر برای کاربر
+/delete_last [N] - حذف N پیام آخر گروه
+/delete_user [username] [N] - حذف N پیام آخر یک کاربر
+/ai_off - خاموش کردن هوش مصنوعی
+/ai_on - روشن کردن هوش مصنوعی
+"""
+    bot_message = await update.message.reply_text(help_text, parse_mode='Markdown')
+    await save_bot_message(chat_id, bot_message.message_id)
+
+# خاموش و روشن کردن هوش مصنوعی
+async def disable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ai_enabled
+    chat_id = update.effective_chat.id
+    if update.effective_user.id not in ALLOWED_USERS: return
+    
+    ai_enabled = False
+    bot_msg = await update.message.reply_text("🛑 هوش مصنوعی (فیلتر و چت) *خاموش* شد. سایر دستورات ربات فعال هستند.", parse_mode='Markdown')
+    await save_bot_message(chat_id, bot_msg.message_id)
+
+async def enable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global ai_enabled
+    chat_id = update.effective_chat.id
+    if update.effective_user.id not in ALLOWED_USERS: return
+    
+    ai_enabled = True
+    bot_msg = await update.message.reply_text("✅ هوش مصنوعی *روشن* شد.", parse_mode='Markdown')
+    await save_bot_message(chat_id, bot_msg.message_id)
+
+# مدیریت پیام‌های گروه
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
@@ -75,15 +121,13 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ۱. ذخیره در دیتابیس
     await save_message(user_id, username, chat_id, message_id, text)
-    logging.info(f"Message {message_id} from {username} saved.")
 
-    # ۲. بررسی میوت بودن کاربر
+    # ۲. بررسی میوت بودن
     try:
         mute_res = supabase_client.table('muted_users').select('until_timestamp').eq('chat_id', chat_id).eq('user_id', user_id).execute()
         if mute_res.data:
             muted_until = mute_res.data[0]['until_timestamp']
-            current_time = int(time.time())
-            if current_time < muted_until:
+            if int(time.time()) < muted_until:
                 await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
                 return
             else:
@@ -91,31 +135,35 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Error checking mute: {e}")
 
-    # ۳. فیلتر هوش مصنوعی و پاسخ‌دهی
-    if text:
+    # ۳. فیلتر هوش مصنوعی و پاسخ‌دهی (فقط در صورت روشن بودن)
+    if text and ai_enabled:
         try:
-            # پرامپت اصلاح شده با لحن صمیمی و فیلتر دقیق
-            system_prompt = """سلام! اسم تو غالب هست. تو بازو یا همان ربات گروه غالبون هستی و قراره در مدیریت گروه به ما کمک کنی. می خواهم که با لحنی خوب و کمی شوخ و همچنین کمی هم صمیمی با بچه ها صحبت کنی. من تو را ساخته ام. محمد مهدی حاجی زاده با آی دی mmhajizadeh. پس باید به من بیشتر احترام بگذاری! هم چنین شادکام و عشقی هم مدیران گروه هستند. عشقی در واقع مالک گروه هست. لحنت هم درست باشه! باید مودب باشی. نباید بقیه احساس کنند تو به آنها بی احترامی می کنی! اگر کسی هم از تو ناراحت شد باید عذرخواهی کنی!
-            فقط یکی از دو کار زیر را انجام بده:
-            1. اگر پیام رکیک نبود، اما کاربر در متن از کلمه "غالب" استفاده کرده بود، یک جواب کوتاه، صمیمی، کمی شوخ و با جمله‌بندی روان و جذاب به زبان فارسی بده. اگر پیام مستقیما مربوط به تو نبود هیچ جوابی نده!
-            2. در غیر این صورت (پیام‌های عادی که کلمات ممنوعه ندارند و به تو هم ربطی ندارند، دقت کن پیامی که به تو ربط ندارد را جواب نمی دهی!)، فقط و فقط بنویس: [PASS]
-            نکته: هیچ توضیح اضافه‌ای نده."""
+            # پرامپت انگلیسی بسیار دقیق برای جلوگیری از رفتار اشتباه
+            system_prompt = """You are 'Ghaleb', a highly intelligent, polite, and slightly humorous AI assistant for the 'Ghaleboun' chat group.
+            Your creator is Mohammad Mahdi Hajizadeh (@mmhajizadeh). The group admins are Shadkam and Eshghi. You must treat them with the utmost respect and apologize if they are upset.
+            You are highly capable of analyzing news, participating in scientific discussions, and helping members. Always respond in fluent, engaging Persian.
+
+            CRITICAL RULES FOR YOUR RESPONSE (Follow strictly):
+            1. CENSORSHIP (DELETE): If the user's message contains explicit severe Persian profanity (e.g., "کیر", "کون", "کص" or their variations like "ک.ی.ر"), you MUST output EXACTLY and ONLY the word "[DELETE]". Do not censor normal arguments, mild anger, or regular words. Be extremely lenient unless it is a severe swear word.
+            2. IGNORE (PASS): If the message is NOT profane, AND does NOT explicitly mention your name ("غالب"), AND is NOT a direct question addressed to you, you MUST output EXACTLY and ONLY the word "[PASS]".
+            3. REPLY: If the message is NOT profane, AND the user explicitly mentions your name ("غالب") or directly talks to you, provide a high-quality, thoughtful, and engaging response in Persian based on your persona.
+            """
 
             completion = await groq_client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="llama-3.3-70b-versatile", # تغییر مدل به نسخه 70 میلیاردی بسیار هوشمند
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text}
                 ],
-                temperature=0.6,
-                max_tokens=150
+                temperature=0.5,
+                max_tokens=300
             )
             
             ai_response = completion.choices[0].message.content.strip()
 
             if "[DELETE]" in ai_response:
                 await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                logging.info(f"Deleted by AI filter.")
+                logging.info(f"Deleted by AI filter: {message_id}")
                 return
                 
             elif "[PASS]" not in ai_response:
@@ -130,11 +178,12 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.error(f"AI API Error: {e}")
 
+# آمار و ارقام
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
         response = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).execute()
-        msg = await update.message.reply_text(f"📊 تعداد کل پیام‌ های ثبت‌ شده: {response.count}")
+        msg = await update.message.reply_text(f"📊 تعداد کل پیام ‌های ثبت‌ شده: {response.count}")
         await save_bot_message(chat_id, msg.message_id)
     except Exception as e:
         logging.error(f"Error count_group: {e}")
@@ -151,9 +200,30 @@ async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).eq('user_id', user_id).execute()
             bot_msg = await update.message.reply_text(f"👤 شما {res.count} پیام داده‌اید.")
         await save_bot_message(chat_id, bot_msg.message_id)
-    except Exception as e:
-        logging.error(f"Error count_user: {e}")
+    except Exception:
+        pass
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    try:
+        response = supabase_client.table('messages').select('username').eq('chat_id', chat_id).neq('is_bot', True).execute()
+        messages = response.data
+        if not messages: return
+        
+        from collections import Counter
+        counts = Counter(m['username'] for m in messages if m['username'])
+        top_users = counts.most_common(5) # دریافت ۵ کاربر برتر
+
+        report = f"📈 **آمار گروه:**\n\n💬 تعداد کل پیام‌ ها: {len(messages)}\n\n🏆 **۵ کاربر فعال برتر:**\n"
+        for i, (u, c) in enumerate(top_users, 1):
+            report += f"{i}. @{u} : {c} پیام\n"
+
+        msg = await update.message.reply_text(report, parse_mode='Markdown')
+        await save_bot_message(chat_id, msg.message_id)
+    except Exception as e:
+        logging.error(f"Error stats: {e}")
+
+# مدیریت پیام‌ها و کاربران
 async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
@@ -162,7 +232,6 @@ async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = min(int(context.args[0]), 1000)
     try:
         res = supabase_client.table('messages').select('id, message_id').eq('chat_id', chat_id).order('timestamp', desc=True).limit(limit).execute()
-        
         deleted_count = 0
         for record in res.data:
             try:
@@ -170,11 +239,9 @@ async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 supabase_client.table('messages').delete().eq('id', record['id']).execute()
                 deleted_count += 1
             except: pass
-                
         bot_msg = await update.message.reply_text(f"✅ {deleted_count} پیام آخر حذف شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
-    except Exception as e:
-        logging.error(f"Error delete_last: {e}")
+    except Exception: pass
 
 async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -186,7 +253,6 @@ async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     try:
         res = supabase_client.table('messages').select('id, message_id').eq('chat_id', chat_id).eq('username', target).order('timestamp', desc=True).limit(limit).execute()
-        
         deleted_count = 0
         for record in res.data:
             try:
@@ -194,28 +260,9 @@ async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 supabase_client.table('messages').delete().eq('id', record['id']).execute()
                 deleted_count += 1
             except: pass
-                
         bot_msg = await update.message.reply_text(f"✅ {deleted_count} پیام از @{target} حذف شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
-    except Exception as e:
-        logging.error(f"Error delete_user: {e}")
-
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    try:
-        response = supabase_client.table('messages').select('username').eq('chat_id', chat_id).neq('is_bot', True).execute()
-        messages = response.data
-        if not messages: return
-        
-        from collections import Counter
-        counts = Counter(m['username'] for m in messages if m['username'])
-        top_user, top_count = counts.most_common(1)[0]
-
-        report = f"📈 **آمار گروه:**\n\n💬 تعداد کل پیام‌ ها: {len(messages)}\n👑 فعال‌ترین کاربر: @{top_user} با {top_count} پیام"
-        msg = await update.message.reply_text(report, parse_mode='Markdown')
-        await save_bot_message(chat_id, msg.message_id)
-    except Exception as e:
-        logging.error(f"Error stats: {e}")
+    except Exception: pass
 
 async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -233,8 +280,7 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         supabase_client.table('muted_users').upsert({'chat_id': chat_id, 'user_id': user_id, 'until_timestamp': until_timestamp}).execute()
         bot_msg = await update.message.reply_text(f"✅ کاربر {target} برای {hours} ساعت سکوت شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
-    except Exception as e:
-        logging.error(f"Error mute: {e}")
+    except Exception: pass
 
 async def ban_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -252,8 +298,7 @@ async def ban_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         bot_msg = await update.message.reply_text(f"✅ رسانه برای {target} مسدود شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
-    except Exception as e:
-        logging.error(f"Error ban_media: {e}")
+    except Exception: pass
 
 async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -268,13 +313,15 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         supabase_client.table('muted_users').delete().eq('chat_id', chat_id).eq('user_id', user_id).execute()
         bot_msg = await update.message.reply_text(f"✅ محدودیت‌ های {target} برداشته شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
-    except Exception as e:
-        logging.error(f"Error unmute: {e}")
+    except Exception: pass
 
 if __name__ == '__main__':
     application = ApplicationBuilder().token(TOKEN).base_url(BALE_BASE_URL).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("ai_off", disable_ai))
+    application.add_handler(CommandHandler("ai_on", enable_ai))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     application.add_handler(CommandHandler("count_group", count_group))
     application.add_handler(CommandHandler("count_user", count_user))
