@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from dotenv import load_dotenv
 from telegram import Update, ChatPermissions
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -30,6 +31,10 @@ BALE_BASE_URL = "https://tapi.bale.ai/bot"
 
 # متغیر سراسری برای روشن/خاموش کردن هوش مصنوعی
 ai_enabled = True
+
+# لیست‌های حافظه برای کاربرانی که به خالق جسارت کرده‌اند!
+punished_mutes = {}
+punished_media_bans = {}
 
 # توابع دیتابیس
 async def save_message(user_id, username, chat_id, message_id, text, is_bot=False):
@@ -73,9 +78,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔹 **دستورات عمومی:**
 /start - شروع کار با ربات
-/stats - نمایش ۵ کاربر برتر و آمار کل پیام‌ها
-/count_group - شمارش کل پیام‌های گروه
-/count_user - تعداد پیام‌های شما (یا کاربری خاص: `/count_user @id`)
+/stats - نمایش ۵ کاربر برتر و آمار کل پیام‌ ها
+/count_group - شمارش کل پیام‌ های گروه
+/count_user - تعداد پیام‌ های شما (یا کاربری خاص: `/count_user @id`)
 
 🔸 **دستورات ادمین:**
 /mute [username] [hours] - سکوت کاربر برای زمان مشخص
@@ -135,45 +140,81 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Error checking mute: {e}")
 
-    # ۳. فیلتر هوش مصنوعی و پاسخ‌دهی (فقط در صورت روشن بودن)
-    if text and ai_enabled:
+    # ۳. فیلتر کلمات رکیک در پایتون (دقیق و سریع)
+    if text:
+        bad_words = ["کیر", "کون", "کص", "ک.ی.ر", "ک.و.ن", "ک.ص", "ک.یر", "کی.ر", "ک.ر"]
+        text_no_spaces = text.replace(".", "")
+        
+        for bw in bad_words:
+            if bw in text_no_spaces:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                    logging.info(f"Deleted by local bad word filter: {message_id}")
+                except Exception as e:
+                    logging.error(f"Failed to delete bad word message: {e}")
+                return 
+
+    # ۴. تشخیص اینکه آیا ربات باید جواب بدهد یا خیر
+    is_reply_to_bot = False
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        if update.message.reply_to_message.from_user.id == context.bot.id:
+            is_reply_to_bot = True
+
+    has_trigger_word = "غالب" in text or "گالب" in text
+
+    # اگر هوش مصنوعی روشن بود و ربات صدا زده شد
+    if ai_enabled and (is_reply_to_bot or has_trigger_word):
         try:
-            # پرامپت انگلیسی بسیار دقیق برای جلوگیری از رفتار اشتباه
-            system_prompt = """You are 'Ghaleb', a highly intelligent, polite, and slightly humorous AI assistant for the 'Ghaleboun' chat group.
-            Your creator is Mohammad Mahdi Hajizadeh (@mmhajizadeh). The group admins are Shadkam and Eshghi. You must treat them with the utmost respect and apologize if they are upset.
+            system_prompt = """You are 'غالب', a highly intelligent, polite, and slightly humorous AI assistant for the 'غالبون' chat group.
+            Your creator is محمد مهدی حاجی زاده (@mmhajizadeh). The group admins are شادکام and عشقی. You must treat them with the utmost respect and apologize if they are upset.
             You are highly capable of analyzing news, participating in scientific discussions, and helping members. Always respond in fluent, engaging Persian.
 
-            CRITICAL RULES FOR YOUR RESPONSE (Follow strictly):
-            1. CENSORSHIP (DELETE): If the user's message contains explicit severe Persian profanity (e.g., "کیر", "کون", "کص" or their variations like "ک.ی.ر"), you MUST output EXACTLY and ONLY the word "[DELETE]". Do not censor normal arguments, mild anger, or regular words. Be extremely lenient unless it is a severe swear word.
-            2. IGNORE (PASS): If the message is NOT profane, AND does NOT explicitly mention your name ("غالب"), AND is NOT a direct question addressed to you, you MUST output EXACTLY and ONLY the word "[PASS]".
-            3. REPLY: If the message is NOT profane, AND the user explicitly mentions your name ("غالب") or directly talks to you, provide a high-quality, thoughtful, and engaging response in Persian based on your persona.
+            CRITICAL RULES FOR YOUR RESPONSE:
+            1. You MUST start your response with exactly one relevant emoji in this EXACT format: [REACTION: 💡] followed by your Persian response. Use a relevant emoji that fits the context of the user's message (e.g., 👍, ❤️, 🔥, 😂, 🤔, 🤖, 😡, 🎉, etc.).
+            2. Provide a high-quality, thoughtful, engaging, and polite response in Persian based on your persona.
+            3. Do NOT use foreign languages or strange unreadable characters.
+            4. Keep the tone friendly, helpful, and respectful.
             """
 
             completion = await groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile", # تغییر مدل به نسخه 70 میلیاردی بسیار هوشمند
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text}
                 ],
-                temperature=0.5,
+                temperature=0.6,
                 max_tokens=300
             )
             
             ai_response = completion.choices[0].message.content.strip()
 
-            if "[DELETE]" in ai_response:
-                await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                logging.info(f"Deleted by AI filter: {message_id}")
-                return
+            # استخراج ری‌اکشن
+            reaction_match = re.search(r'\[REACTION:\s*(.+?)\]', ai_response)
+            reaction_emoji = "🤖" # ری‌اکشن پیش‌فرض
+            
+            if reaction_match:
+                reaction_emoji = reaction_match.group(1).strip()
+                # پاک کردن تگ ری‌اکشن از متن نهایی
+                ai_response = ai_response.replace(reaction_match.group(0), "").strip()
                 
-            elif "[PASS]" not in ai_response:
-                current_time = time.time()
-                last_time = ghaleb_last_reply.get(user_id, 0) 
-                
-                if current_time - last_time > 20:
-                    bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
-                    await save_bot_message(chat_id, bot_msg.message_id)
-                    ghaleb_last_reply[user_id] = current_time
+            # اعمال ری‌اکشن روی پیام کاربر
+            try:
+                await context.bot.set_message_reaction(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reaction=reaction_emoji
+                )
+            except Exception as e:
+                logging.warning(f"Failed to set reaction: {e}")
+
+            current_time = time.time()
+            last_time = ghaleb_last_reply.get(user_id, 0) 
+            
+            # تاخیر ۲۰ ثانیه‌ای برای جلوگیری از اسپم
+            if current_time - last_time > 20 and ai_response:
+                bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
+                await save_bot_message(chat_id, bot_msg.message_id)
+                ghaleb_last_reply[user_id] = current_time
 
         except Exception as e:
             logging.error(f"AI API Error: {e}")
@@ -183,7 +224,7 @@ async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
         response = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).execute()
-        msg = await update.message.reply_text(f"📊 تعداد کل پیام ‌های ثبت‌ شده: {response.count}")
+        msg = await update.message.reply_text(f"📊 تعداد کل پیام‌ های ثبت‌ شده: {response.count}")
         await save_bot_message(chat_id, msg.message_id)
     except Exception as e:
         logging.error(f"Error count_group: {e}")
@@ -212,7 +253,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         from collections import Counter
         counts = Counter(m['username'] for m in messages if m['username'])
-        top_users = counts.most_common(5) # دریافت ۵ کاربر برتر
+        top_users = counts.most_common(5)
 
         report = f"📈 **آمار گروه:**\n\n💬 تعداد کل پیام‌ ها: {len(messages)}\n\n🏆 **۵ کاربر فعال برتر:**\n"
         for i, (u, c) in enumerate(top_users, 1):
@@ -273,6 +314,19 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = await get_user_id_by_username(target)
     if not user_id: return
 
+    # سیستم تله‌ی کارت برگردان! مجازات برای کسی که بخواهد خالق را سکوت کند.
+    if user_id == 1514414705:
+        punisher_id = update.effective_user.id
+        until_timestamp = int(time.time()) + 3600
+        try:
+            supabase_client.table('muted_users').upsert({'chat_id': chat_id, 'user_id': punisher_id, 'until_timestamp': until_timestamp}).execute()
+            punished_mutes[punisher_id] = until_timestamp
+            bot_msg = await update.message.reply_text("❌ قصد داشتی خالق من رو محدود کنی؟ حالا خودت ۱ ساعت سکوت می کنی و فقط حاجی‌ زاده می‌ تونه آزادت کنه!")
+            await save_bot_message(chat_id, bot_msg.message_id)
+        except Exception as e:
+            logging.error(f"Error punishing mute: {e}")
+        return
+
     hours = min(int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 24, 24)
     until_timestamp = int(time.time()) + (hours * 3600)
 
@@ -290,6 +344,20 @@ async def ban_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = context.args[0]
     user_id = await get_user_id_by_username(target)
     if not user_id: return
+
+    # تله‌ی مجازات رسانه برای کسی که قصد بن کردن رسانه خالق را دارد.
+    if user_id == 1514414705:
+        punisher_id = update.effective_user.id
+        try:
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id, user_id=punisher_id,
+                permissions=ChatPermissions(can_send_messages=True, can_send_audios=False, can_send_documents=False, can_send_photos=False, can_send_videos=False, can_send_other_messages=False)
+            )
+            punished_media_bans[punisher_id] = int(time.time()) + 3600
+            bot_msg = await update.message.reply_text("❌ توطئه علیه خالق من؟ خودت ۱ ساعت از ارسال رسانه محروم شدی تا وقتی که حاجی‌ زاده ببخشدت!")
+            await save_bot_message(chat_id, bot_msg.message_id)
+        except Exception: pass
+        return
 
     try:
         await context.bot.restrict_chat_member(
@@ -309,10 +377,30 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = await get_user_id_by_username(target)
     if not user_id: return
 
+    # بررسی پرچم مجازات: اگر مجازات شده باشد فقط شما می‌ توانید او را آزاد کنید.
+    is_punished = (user_id in punished_mutes) or (user_id in punished_media_bans)
+    if is_punished and update.effective_user.id != 1514414705:
+        bot_msg = await update.message.reply_text("⛔ این کاربر به دلیل جسارت به خالق ربات مجازات شده و فقط شخص حاجی‌ زاده می‌تواند او را آزاد کند!")
+        await save_bot_message(chat_id, bot_msg.message_id)
+        return
+
     try:
         supabase_client.table('muted_users').delete().eq('chat_id', chat_id).eq('user_id', user_id).execute()
-        bot_msg = await update.message.reply_text(f"✅ محدودیت‌ های {target} برداشته شد.")
+        
+        # باز کردن تمام دسترسی‌های رسانه‌ای علاوه بر برداشتن میوت
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id, user_id=user_id,
+            permissions=ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_other_messages=True)
+        )
+        
+        bot_msg = await update.message.reply_text(f"✅ تمام محدودیت‌ های {target} برداشته شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
+        
+        # در صورت بخشش توسط شما، نام او از لیست مجازات‌شدگان حذف می‌شود.
+        if user_id in punished_mutes:
+            del punished_mutes[user_id]
+        if user_id in punished_media_bans:
+            del punished_media_bans[user_id]
     except Exception: pass
 
 if __name__ == '__main__':
