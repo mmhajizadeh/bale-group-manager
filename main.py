@@ -7,6 +7,9 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 import time
 from groq import AsyncGroq
 from supabase import create_client, Client
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 # بارگذاری متغیرهای محیطی
 load_dotenv()
 logging.basicConfig(
@@ -17,10 +20,10 @@ TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 AI_API_KEY = os.getenv('AI_API_KEY')
+
 # راه‌اندازی کلاینت‌ها
 groq_client = AsyncGroq(api_key=AI_API_KEY)
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-punished_media_bans = {}
 
 ALLOWED_USERS = [1514414705, 941154813, 1219981601, 1676230636]
 ghaleb_last_reply = {}
@@ -32,6 +35,23 @@ ai_enabled = True
 # لیست‌های حافظه برای کاربرانی که به خالق جسارت کرده‌اند!
 punished_mutes = {}
 punished_media_bans = {}
+
+# سرور وب سبک برای پاسخ به Render و UptimeRobot
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(b"Ghaleb Bot is alive and healthy!")
+
+    def log_message(self, format, *args):
+        return  # خاموش کردن لاگ های مزاحم پینگ
+
+def run_health_check_server():
+    port = int(os.environ.get('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logging.info(f"Health check server running on port {port}")
+    server.serve_forever()
 
 # توابع دیتابیس
 async def save_message(user_id, username, chat_id, message_id, text, is_bot=False):
@@ -191,7 +211,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if reaction_match:
                 reaction_emoji = reaction_match.group(1).strip()
-                # پاک کردن تگ ری‌اکشن از متن نهایی
                 ai_response = ai_response.replace(reaction_match.group(0), "").strip()
                 
             # اعمال ری‌اکشن روی پیام کاربر
@@ -342,7 +361,6 @@ async def ban_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = await get_user_id_by_username(target)
     if not user_id: return
 
-    # تله‌ی مجازات رسانه برای کسی که قصد بن کردن رسانه خالق را دارد.
     if user_id == 1514414705:
         punisher_id = update.effective_user.id
         try:
@@ -374,7 +392,6 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = await get_user_id_by_username(target)
     if not user_id: return
 
-    # بررسی پرچم مجازات: اگر مجازات شده باشد فقط شما می‌ توانید او را آزاد کنید.
     is_punished = (user_id in punished_mutes) or (user_id in punished_media_bans)
     if is_punished and update.effective_user.id != 1514414705:
         bot_msg = await update.message.reply_text("⛔ این کاربر به دلیل جسارت به خالق ربات مجازات شده و فقط شخص حاجی‌ زاده می‌تواند او را آزاد کند!")
@@ -384,7 +401,6 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         supabase_client.table('muted_users').delete().eq('chat_id', chat_id).eq('user_id', user_id).execute()
         
-        # باز کردن تمام دسترسی‌های رسانه‌ای علاوه بر برداشتن میوت
         await context.bot.restrict_chat_member(
             chat_id=chat_id, user_id=user_id,
             permissions=ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_other_messages=True)
@@ -393,7 +409,6 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_msg = await update.message.reply_text(f"✅ تمام محدودیت‌ های {target} برداشته شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
         
-        # در صورت بخشش توسط شما، نام او از لیست مجازات‌شدگان حذف می‌شود.
         if user_id in punished_mutes:
             del punished_mutes[user_id]
         if user_id in punished_media_bans:
@@ -401,6 +416,11 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception: pass
 
 if __name__ == '__main__':
+    # ۱. اجرای وب‌سرور در یک ترد مجزا برای زنده نگه داشتن پورت در Render
+    web_thread = threading.Thread(target=run_health_check_server, daemon=True)
+    web_thread.start()
+
+    # ۲. راه‌اندازی اپلیکیشن ربات تلگرام/بله
     application = ApplicationBuilder().token(TOKEN).base_url(BALE_BASE_URL).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -417,12 +437,5 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("ban_media", ban_media))
     application.add_handler(CommandHandler("unmute", unmute_user))
 
-    WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-
-    if WEBHOOK_URL:
-        PORT = int(os.environ.get('PORT', 10000))
-        logging.info(f"Starting bot in WEBHOOK mode on port {PORT}")
-        application.run_webhook(listen='0.0.0.0', port=PORT, webhook_url=f"{WEBHOOK_URL}/webhook", url_path='webhook')
-    else:
-        logging.info("Starting bot in POLLING mode. Press Ctrl+C to stop.")
-        application.run_polling()
+    logging.info("Starting bot in POLLING mode. Press Ctrl+C to stop.")
+    application.run_polling()
