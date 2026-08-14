@@ -299,39 +299,57 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # دریافت حافظه ماندگار
             permanent_knowledge = get_permanent_memories()
 
-            system_instruction = f"""تو «غالب» هستی؛ یک هوش مصنوعی بسیار باهوش، فوق‌العاده شوخ‌طبع، حاضر‌جواب، صمیمی و نکته‌سنج (دقیقاً مثل هوش مصنوعی میرا در تلگرام) برای گروه «غالبون».
-سازنده تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با آنها بسیار محترمانه و خودمانی صحبت کن.
+            system_instruction = f"""تو «غالب» هستی؛ دستیار هوش مصنوعی هوشمند، کاردرست، محترم و خوش‌برخورد برای گروه «غالبون».
+سازنده و برنامه‌نویس تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با مدیران و اعضا با ادب، احترام و لحنی متین صحبت کن.
 
 اطلاعات و حافظه دائمی تو درباره اعضا و قوانین:
 {permanent_knowledge}
 
-دستورالعمل‌های کلیدی:
-۱. فقط و فقط به زبان فارسی طبیعی و عامیانه/محاوره‌ای صحبت کن.
-۲. حتماً پاسخ خود را دقیقاً با فرمت [REACTION: 💡] آغاز کن و یک ایموجی متناسب بگذار.
-۳. اگر تصویری ارسال شد، تصویر را به دقت تحلیل کن و با طنز و تیزبینی به آن واکنش نشان بده.
-۴. پاسخ‌ها کوتاه، پرانرژی و جذاب باشند.
+دستورالعمل‌های حیاتی برای لحن و پاسخ:
+۱. زبان پاسخ فقط فارسی روان، سلیس و نیمه‌محاوره‌ای (محترمانه اما صمیمی) باشد.
+۲. شوخ‌طبعی و صمیمیت را بسیار ملایم، زیرپوستی و اندازه نگه دار؛ به هیچ وجه در شوخی زیاده‌روی نکن و لودگی یا شوخی‌های تند و بی‌مورد نداشته باش.
+۳. سنگین، نکته‌سنج، منطقی و کمک‌کننده باش.
+۴. حتماً در ابتدای پاسخ دقیقاً یک ایموجی متناسب با حس پیام در قالب [REACTION: 💡] بگذار.
+۵. اگر تصویری ارسال شد، تصویر را دقیق و با متانت تحلیل کن.
+۶. پاسخ‌ها مختصر، شسته‌رفته و مفید باشند.
 """
 
-            # آماده‌سازی ورودی برای Gemini
-            prompt_parts = [system_instruction]
+            # ساخت متن ورودی
+            input_text = f"{system_instruction}\n\n"
             if history_context:
-                prompt_parts.append(f"--- تاریخچه پیام‌های اخیر گروه ---\n{history_context}")
+                input_text += f"--- تاریخچه پیام‌های اخیر گروه ---\n{history_context}\n\n"
             if replied_text:
-                prompt_parts.append(f"--- پیامی که به آن ریپلای شده ---\n{replied_text}")
-            
-            prompt_parts.append(f"--- پیام فعلی کاربر ({username}) ---\n{text if text else '[ارسال تصویر]'}")
+                input_text += f"--- پیامی که به آن ریپلای شده ---\n{replied_text}\n\n"
+            input_text += f"--- پیام فعلی کاربر ({username}) ---\n{text if text else '[ارسال تصویر]'}"
 
-            # بررسی تصویر
+            # بررسی و دانلود ایمن تصویر از سرور بله
+            image_bytes = None
             if has_photo:
-                photo_file = await update.message.photo[-1].get_file()
-                photo_bytes = await photo_file.download_as_bytearray()
-                image_part = types.Part.from_bytes(data=bytes(photo_bytes), mime_type="image/jpeg")
-                prompt_parts.append(image_part)
+                try:
+                    import httpx
+                    file_info = await context.bot.get_file(update.message.photo[-1].file_id)
+                    if file_info.file_path:
+                        # دانلود مستقیم از آدرس فایل بله
+                        async with httpx.AsyncClient() as client:
+                            file_url = f"https://tapi.bale.ai/file/bot{TOKEN}/{file_info.file_path}"
+                            resp = await client.get(file_url)
+                            if resp.status_code == 200:
+                                image_bytes = resp.content
+                except Exception as img_err:
+                    logging.warning(f"Image download skipped/failed: {img_err}")
 
-            # ارسال به مدل چندوجهی جمینای
+            # ارسال به مدل چندوجهی Gemini
+            if image_bytes:
+                prompt_input = [
+                    input_text,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+                ]
+            else:
+                prompt_input = input_text
+
             interaction = gemini_client.interactions.create(
                 model="gemini-3.5-flash-lite",
-                input=prompt_parts
+                input=prompt_input
             )
 
             ai_response = interaction.output_text.strip() if interaction.output_text else ""
@@ -350,7 +368,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             current_time = time.time()
             last_time = ghaleb_last_reply.get(user_id, 0)
-            if current_time - last_time > 8 and ai_response:
+            if current_time - last_time > 5 and ai_response:
                 bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
                 await save_bot_message(chat_id, bot_msg.message_id)
                 ghaleb_last_reply[user_id] = current_time
