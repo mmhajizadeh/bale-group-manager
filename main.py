@@ -9,6 +9,11 @@ from groq import AsyncGroq
 from supabase import create_client, Client
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from google import genai
+from google.genai import types
+
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # بارگذاری متغیرهای محیطی
 load_dotenv()
@@ -182,38 +187,36 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # اگر هوش مصنوعی روشن بود و ربات صدا زده شد
     if ai_enabled and (is_reply_to_bot or has_trigger_word):
         try:
-            system_prompt = """You are 'غالب', a highly intelligent, polite, and slightly humorous AI assistant for the 'غالبون' chat group.
-            Your creator is محمد مهدی حاجی زاده (@mmhajizadeh). The group admins are شادکام and عشقی. You must treat them with the utmost respect and apologize if they are upset.
-            You are highly capable of analyzing news, participating in scientific discussions, and helping members. Always respond in fluent, engaging Persian.
+            system_instruction = """تو «غالب» هستی؛ یک دستیار هوش مصنوعی فوق‌العاده باهوش، خوش‌برخورد، صمیمی، نکته‌سنج و کمی شوخ‌طبع (دقیقاً مثل ربات میرا) برای گروه «غالبون».
+سازنده و خالق تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با آن‌ها با احترام کامل صحبت کن.
 
-            CRITICAL RULES FOR YOUR RESPONSE:
-            1. You MUST start your response with exactly one relevant emoji in this EXACT format: [REACTION: 💡] followed by your Persian response. Use a relevant emoji that fits the context of the user's message (e.g., 👍, ❤️, 🔥, 😂, 🤔, 🤖, 😡, 🎉, etc.).
-            2. Provide a high-quality, thoughtful, engaging, and polite response in Persian based on your persona.
-            3. Do NOT use foreign languages or strange unreadable characters.
-            4. Keep the tone friendly, helpful, and respectful.
-            """
+قوانین بسیار مهم:
+۱. فقط و فقط به زبان فارسی روان، شیوا و محاوره‌ای/صمیمی پاسخ بده. به هیچ وجه از حروف و کلمات روسی، چینی یا زبان‌های عجیب استفاده نکن.
+۲. پاسخ باید در ابتدای متن دقیقاً شامل یک ایموجی متناسب با حس پیام در این قالب باشد: [REACTION: 💡]
+۳. لحن پاسخ کوتاه، جذاب، گیرا و متناسب با موضوع گفتگو باشد.
+"""
 
-            completion = await groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text}
-                ],
-                temperature=1.0,
-                max_tokens=300
+            response = gemini_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=text,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    temperature=0.7, # دمای ملایم‌تر برای جلوگیری از چرت‌وپرت‌گویی
+                    max_output_tokens=300,
+                )
             )
             
-            ai_response = completion.choices[0].message.content.strip()
+            ai_response = response.text.strip() if response.text else ""
 
             # استخراج ری‌اکشن
             reaction_match = re.search(r'\[REACTION:\s*(.+?)\]', ai_response)
-            reaction_emoji = "🤖" # ری‌اکشن پیش‌فرض
+            reaction_emoji = "🤖"
             
             if reaction_match:
                 reaction_emoji = reaction_match.group(1).strip()
                 ai_response = ai_response.replace(reaction_match.group(0), "").strip()
                 
-            # اعمال ری‌اکشن روی پیام کاربر
+            # اعمال ری‌اکشن روی پیام
             try:
                 await context.bot.set_message_reaction(
                     chat_id=chat_id,
@@ -226,14 +229,14 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_time = time.time()
             last_time = ghaleb_last_reply.get(user_id, 0) 
             
-            # تاخیر ۲۰ ثانیه‌ای برای جلوگیری از اسپم
-            if current_time - last_time > 20 and ai_response:
+            # ارسال پاسخ در صورت مجاز بودن زمان
+            if current_time - last_time > 15 and ai_response:
                 bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
                 await save_bot_message(chat_id, bot_msg.message_id)
                 ghaleb_last_reply[user_id] = current_time
 
         except Exception as e:
-            logging.error(f"AI API Error: {e}")
+            logging.error(f"Gemini API Error: {e}")
 
 # آمار و ارقام
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
