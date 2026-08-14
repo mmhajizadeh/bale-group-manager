@@ -171,7 +171,7 @@ async def memories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"📋 **حافظه و اطلاعات ماندگار من:**\n\n{mems}", parse_mode='Markdown')
     await save_bot_message(chat_id, msg.message_id)
 
-# تگ کردن همگانی اختصاصی پیام‌رسان بله (با ساختار بومی uid)
+# تگ کردن همگانی هوشمند ویژه بله (تشخیص خودکار نام‌کاربری یا uid)
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS:
@@ -180,29 +180,28 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     custom_text = " ".join(context.args) if context.args else "توجه همگی!"
 
     try:
-        # ۱. دریافت تمام اعضا از پایگاه داده
+        # ۱. دریافت پیام‌ها از دیتابیس برای استخراج کاربران
         res = supabase_client.table('messages').select('user_id, username').eq('chat_id', chat_id).neq('is_bot', True).execute()
         
-        users_dict = {}  # {user_id: display_name}
+        users_dict = {}  # {user_id: username_or_name}
         if res.data:
             for row in res.data:
                 u_id = row.get('user_id')
                 u_name = str(row.get('username') or '').strip()
                 if u_id and int(u_id) > 0:
-                    # حذف کاراکترهای مخدوش‌کننده مارک‌داون از نام
-                    clean_name = re.sub(r'[\[\]()]', '', u_name) or f"کاربر {u_id}"
-                    users_dict[int(u_id)] = clean_name
+                    users_dict[int(u_id)] = u_name
 
-        # ۲. بررسی اعضای خاموش ثبت‌شده در حافظه دائمی
+        # ۲. بررسی اعضای خاموش در حافظه دائمی
         try:
             mem_res = supabase_client.table('bot_memory').select('value').eq('key', 'silent_members').execute()
             if mem_res.data:
                 extra_users = mem_res.data[0]['value'].split()
                 for item in extra_users:
-                    if item.isdigit():
-                        u_id = int(item)
-                        if u_id not in users_dict:
-                            users_dict[u_id] = f"کاربر {u_id}"
+                    item_clean = item.strip().replace('@', '')
+                    if item_clean.isdigit():
+                        users_dict[int(item_clean)] = f"کاربر {item_clean}"
+                    else:
+                        users_dict[f"extra_{item_clean}"] = item_clean
         except Exception:
             pass
 
@@ -210,14 +209,33 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("عضوی برای تگ کردن یافت نشد.")
             return
 
-        # ۳. ساخت لیست تگ‌ها با فرمت بومی بله: [نام](uid:شناسه)
-        mentions_list = [f"[{name}](uid:{u_id})" for u_id, name in users_dict.items()]
+        # ۳. ساخت لیست تگ ترکیبی و هوشمند
+        # الگوی تشخیص نام‌کاربری استاندارد انگلیسی (بدون نقطه، فاصله یا کاراکتر فارسی)
+        valid_username_pattern = re.compile(r'^[a-zA-Z0-9_]{3,32}$')
 
-        # ۴. چیدمان مرتب پیام (دسته‌های ۱۰ تایی در یک یا چند پیام زیبا)
+        mentions_list = []
+        for u_id, name in users_dict.items():
+            clean_name = name.replace('@', '').strip()
+            
+            # اگر نام‌کاربری استاندارد دارد -> با @ تگ شود
+            if valid_username_pattern.match(clean_name):
+                mentions_list.append(f"@{clean_name}")
+            else:
+                # اگر نام‌کاربری ندارد یا کاراکتر خاص/فارسی دارد -> با فرمت uid بله تگ شود
+                safe_name = re.sub(r'[\[\]()]', '', clean_name) or "کاربر"
+                if isinstance(u_id, int):
+                    mentions_list.append(f"[{safe_name}](uid:{u_id})")
+                else:
+                    mentions_list.append(f"@{safe_name}")
+
+        # حذف موارد تکراری احتمالی
+        mentions_list = list(dict.fromkeys(mentions_list))
+
+        # ۴. ارسال دسته‌های ۱۲ تایی
         chunks = [mentions_list[i:i + 12] for i in range(0, len(mentions_list), 12)]
         
         for idx, chunk in enumerate(chunks):
-            mentions_str = " ، ".join(chunk)
+            mentions_str = "  ".join(chunk)
             header = f"📢 **{custom_text}**\n\n" if idx == 0 else ""
             full_msg = f"{header}{mentions_str}"
             
@@ -230,8 +248,8 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logging.error(f"Error in Bale tag_all: {e}")
-        await update.message.reply_text(f"خطا در تگ همگانی: {e}")
-
+        await update.message.reply_text(f"خطا در اجرای تگ: {e}")
+        
 async def disable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ai_enabled
     chat_id = update.effective_chat.id
