@@ -148,10 +148,10 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = update.message.message_id
     text = update.message.text or ""
 
-    # ۱. ذخیره در دیتابیس
+    # ۱. ذخیره پیام جدید در دیتابیس
     await save_message(user_id, username, chat_id, message_id, text)
 
-    # ۲. بررسی میوت بودن
+    # ۲. بررسی وضعیت میوت بودن
     try:
         mute_res = supabase_client.table('muted_users').select('until_timestamp').eq('chat_id', chat_id).eq('user_id', user_id).execute()
         if mute_res.data:
@@ -164,7 +164,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Error checking mute: {e}")
 
-    # ۳. فیلتر کلمات رکیک در پایتون (دقیق و سریع)
+    # ۳. فیلتر کلمات رکیک در پایتون
     if text:
         bad_words = ["کیر", "کون", "کص", "ک.ی.ر", "ک.و.ن", "ک.ص", "ک.یر", "کی.ر", "ک.ر"]
         text_no_spaces = text.replace(".", "")
@@ -178,31 +178,51 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logging.error(f"Failed to delete bad word message: {e}")
                 return 
 
-    # ۴. تشخیص اینکه آیا ربات باید جواب بدهد یا خیر
+    # ۴. تشخیص وضعیت صدا زدن یا ریپلای
     is_reply_to_bot = False
-    if update.message.reply_to_message and update.message.reply_to_message.from_user:
-        if update.message.reply_to_message.from_user.id == context.bot.id:
+    replied_text = ""
+    if update.message.reply_to_message:
+        if update.message.reply_to_message.from_user and update.message.reply_to_message.from_user.id == context.bot.id:
             is_reply_to_bot = True
+        replied_text = update.message.reply_to_message.text or ""
 
     has_trigger_word = "غالب" in text or "گالب" in text
 
-    # اگر هوش مصنوعی روشن بود و ربات صدا زده شد
+    # ۵. پاسخ هوشمند با حافظه زمانی که ربات صدا زده می‌شود
     if ai_enabled and (is_reply_to_bot or has_trigger_word):
         try:
+            # استخراج چند پیام آخر گروه از دیتابیس برای حافظه زمینه‌ای
+            history_context = ""
+            try:
+                recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(11).execute()
+                if recent_msgs.data:
+                    # معکوس کردن لیست تا پیام‌ها به ترتیب زمانی باشند
+                    chat_history = [f"@{m['username']}: {m['text']}" for m in reversed(recent_msgs.data) if m.get('text')]
+                    history_context = "\n".join(chat_history)
+            except Exception as e:
+                logging.warning(f"Failed to fetch history: {e}")
+
             system_instruction = """تو «غالب» هستی؛ یک دستیار هوش مصنوعی بسیار باهوش، خوش‌برخورد، صمیمی، نکته‌سنج، حاضر‌جواب و کمی شوخ‌طبع (دقیقاً مثل هوش مصنوعی میرا در تلگرام) برای گروه چت «غالبون».
-سازنده و خالق تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. همیشه با آن‌ها با احترام کامل صحبت کن.
+سازنده و خالق تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با آن‌ها با نهایت احترام و صمیمیت صحبت کن.
 
 دستورالعمل‌های حیاتی:
-۱. فقط و فقط به زبان فارسی طبیعی، محاوره‌ای و روان صحبت کن. تحت هیچ شرایطی از کاراکترها یا کلمات روسی، چینی، اسپانیایی یا هر زبان دیگری استفاده نکن.
-۲. حتماً پاسخ خود را دقیقاً با این فرمت آغاز کن: [REACTION: 💡] که به جای لامپ، یک ایموجی کاملاً متناسب با حس پیام بگذاری (مثلاً 👍, ❤️, 🔥, 😂, 🤔, 🤖, 😡, 🎉).
-۳. پاسخ‌ها پرانرژی، کوتاه، جذاب و متناسب با موضوع چت باشد و از تکرار متن‌های کلیشه‌ای خودداری کن.
+۱. فقط و فقط به زبان فارسی طبیعی، محاوره‌ای و روان پاسخ بده. اصلاً از کاراکترها یا کلمات غیرفارسی استفاده نکن. تنها اگر نیاز به گفتن اصطلاحی شد از بقیه زبان ها استفاده کن.
+۲. حتماً پاسخ خود را دقیقاً با این فرمت آغاز کن: [REACTION: 💡] و به جای لامپ یک ایموجی کاملاً متناسب با حس پیام بگذار.
+۳. تو به تاریخچه پیام‌های قبلی دسترسی داری؛ اگر کاربر به پیامی ارجاع داده یا سوال قبلی را ادامه داده، از سابقه استفاده کن تا پاسخ پیوسته و هوشمندانه باشد.
+۴. پاسخ‌ها کوتاه، گیرا، دوستانه و پرانرژی باشند.
 """
-            # ترکیب دستورالعمل سیستم و متن کاربر برای ارسال به Interactions API
-            full_prompt = f"{system_instruction}\n\n--- پیام کاربر ---\n{text}"
 
-            # استفاده از متد جدید Interactions API و مدل gemini-3.6-flash
+            # ساخت پرامپت یکپارچه همراه با حافظه و پیام ریپلای‌شده
+            full_prompt = f"{system_instruction}\n\n"
+            if history_context:
+                full_prompt += f"--- تاریخچه چند پیام اخیر گروه ---\n{history_context}\n\n"
+            if replied_text:
+                full_prompt += f"--- پیامی که کاربر به آن ریپلای کرده ---\n{replied_text}\n\n"
+            full_prompt += f"--- پیام فعلی کاربر ({username}) ---\n{text}"
+
+            # فراخوانی مدل پرسرعت و سبک Gemini 3.5 Flash-Lite
             interaction = gemini_client.interactions.create(
-                model="gemini-3.6-flash",
+                model="gemini-3.5-flash-lite",
                 input=full_prompt
             )
             
@@ -216,7 +236,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reaction_emoji = reaction_match.group(1).strip()
                 ai_response = ai_response.replace(reaction_match.group(0), "").strip()
                 
-            # اعمال ری‌اکشن روی پیام کاربر در بله
+            # اعمال ری‌اکشن
             try:
                 await context.bot.set_message_reaction(
                     chat_id=chat_id,
@@ -229,15 +249,15 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current_time = time.time()
             last_time = ghaleb_last_reply.get(user_id, 0) 
             
-            # تاخیر زمانی برای جلوگیری از اسپم
-            if current_time - last_time > 15 and ai_response:
+            # ارسال پاسخ به کاربر
+            if current_time - last_time > 10 and ai_response:
                 bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
                 await save_bot_message(chat_id, bot_msg.message_id)
                 ghaleb_last_reply[user_id] = current_time
 
         except Exception as e:
             logging.error(f"Gemini API Error: {e}")
-
+            
 # آمار و ارقام
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
