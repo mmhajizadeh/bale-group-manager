@@ -7,25 +7,22 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Messa
 import time
 from groq import AsyncGroq
 from supabase import create_client, Client
-
 # بارگذاری متغیرهای محیطی
 load_dotenv()
-
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 AI_API_KEY = os.getenv('AI_API_KEY')
-
 # راه‌اندازی کلاینت‌ها
 groq_client = AsyncGroq(api_key=AI_API_KEY)
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+punished_media_bans = {}
 
-ALLOWED_USERS = [1514414705, 941154813, 1219981601]
+ALLOWED_USERS = [1514414705, 941154813, 1219981601, 1676230636]
 ghaleb_last_reply = {}
 BALE_BASE_URL = "https://tapi.bale.ai/bot"
 
@@ -182,7 +179,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text}
                 ],
-                temperature=0.6,
+                temperature=1.0,
                 max_tokens=300
             )
             
