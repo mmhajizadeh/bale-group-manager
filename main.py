@@ -171,7 +171,7 @@ async def memories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"📋 **حافظه و اطلاعات ماندگار من:**\n\n{mems}", parse_mode='Markdown')
     await save_bot_message(chat_id, msg.message_id)
 
-# تگ کردن حرفه‌ای همه اعضا بر اساس شناسه عددی (User ID)
+# تگ کردن همگانی اختصاصی پیام‌رسان بله
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS:
@@ -180,43 +180,59 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     custom_text = " ".join(context.args) if context.args else "توجه همگی!"
     
     try:
-        # ۱. دریافت آیدی و نام کاربران از پیام‌های ذخیره شده در دیتابیس
+        # ۱. خواندن تمام کاربران ثبت‌شده در دیتابیس
         res = supabase_client.table('messages').select('user_id, username').eq('chat_id', chat_id).neq('is_bot', True).execute()
         
-        users_dict = {} # key: user_id, value: display_name
+        users_dict = {}  # user_id: username_or_name
         if res.data:
             for row in res.data:
                 u_id = row.get('user_id')
                 u_name = row.get('username') or "کاربر"
-                if u_id and u_id > 0:
+                if u_id and int(u_id) > 0:
                     users_dict[u_id] = u_name
 
+        # ۲. اضافه کردن اعضای خاموش ثبت‌شده در حافظه (اگر وجود داشته باشد)
+        try:
+            mem_res = supabase_client.table('bot_memory').select('value').eq('key', 'silent_members').execute()
+            if mem_res.data:
+                extra_users = mem_res.data[0]['value'].replace('@', '').split()
+                for u in extra_users:
+                    # به عنوان یوزرنیم بدون آیدی مشخص اضافه می‌شود
+                    users_dict[f"extra_{u}"] = u.strip()
+        except Exception:
+            pass
+
         if not users_dict:
-            await update.message.reply_text("عضوی برای تگ کردن یافت نشد.")
+            await update.message.reply_text("عضوی برای تگ کردن در دیتابیس ثبت نشده است.")
             return
 
-        # ساخت لیست منشن با Markdown بر اساس شناسه عددی
-        mention_list = []
-        for u_id, u_name in users_dict.items():
-            # تمیزکاری کاراکترهای مخرب Markdown در نام
-            clean_name = re.sub(r'[_*\[\]()~`>#+\-=|{}.!]', '', u_name) or f"کاربر {u_id}"
-            mention_list.append(f"[{clean_name}](tg://user?id={u_id})")
+        # ۳. ساخت لیست تگ سازگار با بله
+        mentions_list = []
+        for u_id, name in users_dict.items():
+            clean_name = re.sub(r'[_*\[\]()~`>#+\-=|{}.!]', '', name).strip()
+            
+            # اگر یوزرنیم است
+            if isinstance(u_id, str) and u_id.startswith("extra_"):
+                mentions_list.append(f"@{clean_name}")
+            else:
+                # تگ متنی با لینک پروتکل بله
+                mentions_list.append(f"[{clean_name}](ble://user?id={u_id})")
 
-        # ارسال در دسته‌های ۱۰ تایی برای جلوگیری از ارور محدودیت پلتفرم
-        chunks = [mention_list[i:i + 10] for i in range(0, len(mention_list), 10)]
+        # ۴. ارسال دسته‌های ۱۰تایی در بله
+        chunks = [mentions_list[i:i + 10] for i in range(0, len(mentions_list), 10)]
         for chunk in chunks:
-            mentions_str = " ، ".join(chunk)
+            mentions_str = "  ".join(chunk)
             full_msg = f"📢 **{custom_text}**\n\n{mentions_str}"
             bot_msg = await context.bot.send_message(
-                chat_id=chat_id, 
-                text=full_msg, 
+                chat_id=chat_id,
+                text=full_msg,
                 parse_mode='Markdown'
             )
             await save_bot_message(chat_id, bot_msg.message_id)
 
     except Exception as e:
-        logging.error(f"Error in tag_all: {e}")
-        await update.message.reply_text(f"خطا در تگ همگانی: {e}")
+        logging.error(f"Error in Bale tag_all: {e}")
+        await update.message.reply_text(f"خطا در اجرای دستور: {e}")
 
 async def disable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ai_enabled
