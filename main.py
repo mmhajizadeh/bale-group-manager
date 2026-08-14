@@ -40,6 +40,11 @@ punished_media_bans = {}
 
 # سرور وب سبک برای پاسخ به Render و UptimeRobot
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
@@ -47,8 +52,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Ghaleb Bot is alive and healthy!")
 
     def log_message(self, format, *args):
-        return  # خاموش کردن لاگ های مزاحم پینگ
-
+        return  # خاموش کردن لاگ های پینگ
+        
 def run_health_check_server():
     port = int(os.environ.get('PORT', 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
