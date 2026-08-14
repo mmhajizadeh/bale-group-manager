@@ -272,16 +272,26 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logging.error(f"Failed to delete bad word: {e}")
                 return 
 
-    # ۴. تشخیص صدا زدن یا ریپلای
+    # ۴. تشخیص صدا زدن یا ریپلای و بررسی عکس
     is_reply_to_bot = False
     replied_text = ""
+    target_photo = None
+
+    # اگر روی پیامی ریپلای شده باشد
     if update.message.reply_to_message:
         if update.message.reply_to_message.from_user and update.message.reply_to_message.from_user.id == context.bot.id:
             is_reply_to_bot = True
         replied_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
+        # اگر پیامی که به آن ریپلای شده عکس دارد
+        if update.message.reply_to_message.photo:
+            target_photo = update.message.reply_to_message.photo[-1]
+
+    # اگر پیام فعلی خودش عکس دارد
+    if update.message.photo:
+        target_photo = update.message.photo[-1]
 
     has_trigger_word = "غالب" in text or "گالب" in text
-    has_photo = bool(update.message.photo)
+    has_photo = target_photo is not None
 
     # ۵. پاسخ هوش مصنوعی
     if ai_enabled and (is_reply_to_bot or has_trigger_word or (has_photo and is_reply_to_bot)):
@@ -291,7 +301,10 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(10).execute()
                 if recent_msgs.data:
-                    chat_history = [f"@{m['username']}: {m['text']}" for m in reversed(recent_msgs.data) if m.get('text')]
+                    chat_history = []
+                    for m in reversed(recent_msgs.data):
+                        msg_t = m.get('text') if m.get('text') else "[عکس/رسانه]"
+                        chat_history.append(f"@{m['username']}: {msg_t}")
                     history_context = "\n".join(chat_history)
             except Exception as e:
                 logging.warning(f"Failed to fetch history: {e}")
@@ -307,42 +320,43 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 دستورالعمل‌های حیاتی برای لحن و پاسخ:
 ۱. زبان پاسخ فقط فارسی روان، سلیس و نیمه‌محاوره‌ای (محترمانه اما صمیمی) باشد.
-۲. شوخ‌طبعی و صمیمیت را بسیار ملایم، زیرپوستی و اندازه نگه دار؛ به هیچ وجه در شوخی زیاده‌روی نکن و لودگی یا شوخی‌های تند و بی‌مورد نداشته باش.
-۳. سنگین، نکته‌سنج، منطقی و کمک‌کننده باش.
-۴. حتماً در ابتدای پاسخ دقیقاً یک ایموجی متناسب با حس پیام در قالب [REACTION: 💡] بگذار.
-۵. اگر تصویری ارسال شد، تصویر را دقیق و با متانت تحلیل کن.
-۶. پاسخ‌ها مختصر، شسته‌رفته و مفید باشند.
+۲. شوخ‌طبعی و صمیمیت را بسیار ملایم، زیرپوستی و اندازه نگه دار؛ به هیچ وجه در شوخی زیاده‌روی نکن.
+۳. حتماً در ابتدای پاسخ دقیقاً یک ایموجی متناسب با حس پیام در قالب [REACTION: 💡] بگذار.
+۴. اگر تصویری ارسال شده یا به تصویری اشاره شده، دقیقاً المان‌های داخل تصویر را با نکته‌سنجی و ادب تحلیل کن.
+۵. پاسخ‌ها مختصر، شسته‌رفته و مفید باشند.
 """
 
-            # ساخت متن ورودی
+            # ساخت متن پیام
             input_text = f"{system_instruction}\n\n"
             if history_context:
                 input_text += f"--- تاریخچه پیام‌های اخیر گروه ---\n{history_context}\n\n"
             if replied_text:
                 input_text += f"--- پیامی که به آن ریپلای شده ---\n{replied_text}\n\n"
-            input_text += f"--- پیام فعلی کاربر ({username}) ---\n{text if text else '[ارسال تصویر]'}"
+            
+            user_msg_content = text if text else "لطفاً این تصویر را ببین و نظرت را بگو."
+            input_text += f"--- پیام فعلی کاربر ({username}) ---\n{user_msg_content}"
 
-            # بررسی و دانلود ایمن تصویر از سرور بله
+            # دانلود تصویر از سرور بله
             image_bytes = None
-            if has_photo:
+            if has_photo and target_photo:
                 try:
                     import httpx
-                    file_info = await context.bot.get_file(update.message.photo[-1].file_id)
+                    file_info = await context.bot.get_file(target_photo.file_id)
                     if file_info.file_path:
-                        # دانلود مستقیم از آدرس فایل بله
                         async with httpx.AsyncClient() as client:
                             file_url = f"https://tapi.bale.ai/file/bot{TOKEN}/{file_info.file_path}"
                             resp = await client.get(file_url)
                             if resp.status_code == 200:
                                 image_bytes = resp.content
+                                logging.info(f"Photo successfully downloaded ({len(image_bytes)} bytes)")
                 except Exception as img_err:
-                    logging.warning(f"Image download skipped/failed: {img_err}")
+                    logging.warning(f"Image download failed: {img_err}")
 
-            # ارسال به مدل چندوجهی Gemini
+            # آماده‌سازی آرایه ورودی برای Gemini Interactions API
             if image_bytes:
                 prompt_input = [
-                    input_text,
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    input_text
                 ]
             else:
                 prompt_input = input_text
