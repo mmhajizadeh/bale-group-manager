@@ -192,19 +192,16 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ۲. حتماً پاسخ خود را دقیقاً با این فرمت آغاز کن: [REACTION: 💡] که به جای لامپ، یک ایموجی کاملاً متناسب با حس پیام بگذاری (مثلاً 👍, ❤️, 🔥, 😂, 🤔, 🤖, 😡, 🎉).
 ۳. پاسخ‌ها پرانرژی، کوتاه، جذاب و متناسب با موضوع چت باشد و از تکرار متن‌های کلیشه‌ای خودداری کن.
 """
+            # ترکیب دستورالعمل سیستم و متن کاربر برای ارسال به Interactions API
+            full_prompt = f"{system_instruction}\n\n--- پیام کاربر ---\n{text}"
 
-            # استفاده از مدل پایدار و رایگان gemini-1.5-flash به صورت async
-            response = await gemini_client.aio.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=text,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.7,
-                    max_output_tokens=300,
-                )
+            # استفاده از متد جدید Interactions API و مدل gemini-3.6-flash
+            interaction = gemini_client.interactions.create(
+                model="gemini-3.6-flash",
+                input=full_prompt
             )
             
-            ai_response = response.text.strip() if response.text else ""
+            ai_response = interaction.output_text.strip() if interaction.output_text else ""
 
             # استخراج ری‌اکشن
             reaction_match = re.search(r'\[REACTION:\s*(.+?)\]', ai_response)
