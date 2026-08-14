@@ -1,13 +1,15 @@
 import os
 import logging
 import re
-from dotenv import load_dotenv
-from telegram import Update, ChatPermissions
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+import io
 import time
-from supabase import create_client, Client
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from dotenv import load_dotenv
+
+from telegram import Update, ChatPermissions
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from supabase import create_client, Client
 from google import genai
 from google.genai import types
 
@@ -23,7 +25,7 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# راه‌اندازی کلاینت‌های دیتابیس و جمینای
+# راه‌اندازی کلاینت‌ها
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -31,14 +33,14 @@ ALLOWED_USERS = [1514414705, 941154813, 1219981601, 1676230636]
 ghaleb_last_reply = {}
 BALE_BASE_URL = "https://tapi.bale.ai/bot"
 
-# متغیر سراسری برای روشن/خاموش کردن هوش مصنوعی
+# پرچم فعال بودن هوش مصنوعی
 ai_enabled = True
 
-# لیست‌های حافظه برای کاربرانی که به خالق جسارت کرده‌اند!
+# لیست‌های حافظه مجازات
 punished_mutes = {}
 punished_media_bans = {}
 
-# سرور وب سبک برای پاسخ به Render و UptimeRobot
+# سرور وب برای Health Check رندر و UptimeRobot
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
@@ -52,15 +54,15 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Ghaleb Bot is alive and healthy!")
 
     def log_message(self, format, *args):
-        return  # خاموش کردن لاگ های پینگ
-        
+        return
+
 def run_health_check_server():
     port = int(os.environ.get('PORT', 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     logging.info(f"Health check server running on port {port}")
     server.serve_forever()
 
-# توابع دیتابیس
+# --- توابع دیتابیس ---
 async def save_message(user_id, username, chat_id, message_id, text, is_bot=False):
     try:
         supabase_client.table('messages').insert({
@@ -88,7 +90,17 @@ async def get_user_id_by_username(username):
         logging.error(f"Error fetching user_id: {e}")
         return None
 
-# هندلرهای پایه‌ای
+def get_permanent_memories():
+    try:
+        res = supabase_client.table('bot_memory').select('key, value').execute()
+        if res.data:
+            return "\n".join([f"- {row['key']}: {row['value']}" for row in res.data])
+        return "هیچ دانشی ثبت نشده است."
+    except Exception as e:
+        logging.warning(f"Error reading permanent memory: {e}")
+        return ""
+
+# --- هندلرهای دستورات ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user.first_name
@@ -104,40 +116,123 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /start - شروع کار با ربات
 /stats - نمایش ۵ کاربر برتر و آمار کل پیام‌ ها
 /count_group - شمارش کل پیام‌ های گروه
-/count_user - تعداد پیام‌ های شما (یا کاربری خاص: `/count_user @id`)
+/count_user - تعداد پیام‌ های شما (یا کاربر خاص: `/count_user @id`)
+/memories - مشاهده حافظه بلندمدت و فکت‌های ذخیره‌شده
 
 🔸 **دستورات ادمین:**
+/remember [موضوع] : [توضیحات] - سپردن نکته دائمی به حافظه ربات
+/forget [موضوع] - پاک کردن موضوع از حافظه
+/tagall [متن] - صدا زدن همگانی همه اعضای گروه
 /mute [username] [hours] - سکوت کاربر برای زمان مشخص
 /unmute [username] - رفع سکوت کاربر
-/ban_media [username] - بستن ارسال عکس/فیلم/استیکر برای کاربر
+/ban_media [username] - بستن ارسال عکس/فیلم/استیکر
 /delete_last [N] - حذف N پیام آخر گروه
-/delete_user [username] [N] - حذف N پیام آخر یک کاربر
+/delete_user [username] [N] - حذف N پیام آخر کاربر
 /ai_off - خاموش کردن هوش مصنوعی
 /ai_on - روشن کردن هوش مصنوعی
 """
     bot_message = await update.message.reply_text(help_text, parse_mode='Markdown')
     await save_bot_message(chat_id, bot_message.message_id)
 
-# خاموش و روشن کردن هوش مصنوعی
+async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if update.effective_user.id not in ALLOWED_USERS: return
+    
+    full_text = " ".join(context.args)
+    if ":" not in full_text:
+        await update.message.reply_text("⚠️ فرمت اشتباه است. الگو: `/remember نام یا برچسب : توضیحات`", parse_mode='Markdown')
+        return
+
+    key, val = [x.strip() for x in full_text.split(":", 1)]
+    try:
+        supabase_client.table('bot_memory').upsert({'key': key, 'value': val}).execute()
+        bot_msg = await update.message.reply_text(f"🧠 نکته جدید در حافظه ماندگار ثبت شد:\n📌 **{key}**: {val}", parse_mode='Markdown')
+        await save_bot_message(chat_id, bot_msg.message_id)
+    except Exception as e:
+        await update.message.reply_text(f"خطا در ذخیره‌سازی: {e}")
+
+async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if update.effective_user.id not in ALLOWED_USERS: return
+    if not context.args: return
+
+    key = " ".join(context.args).strip()
+    try:
+        supabase_client.table('bot_memory').delete().eq('key', key).execute()
+        bot_msg = await update.message.reply_text(f"🗑️ موضوع «{key}» از حافظه من پاک شد.")
+        await save_bot_message(chat_id, bot_msg.message_id)
+    except Exception as e:
+        await update.message.reply_text(f"خطا: {e}")
+
+async def memories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    mems = get_permanent_memories()
+    msg = await update.message.reply_text(f"📋 **حافظه و اطلاعات ماندگار من:**\n\n{mems}", parse_mode='Markdown')
+    await save_bot_message(chat_id, msg.message_id)
+
+async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if update.effective_user.id not in ALLOWED_USERS:
+        return
+
+    custom_text = " ".join(context.args) if context.args else "توجه همگی!"
+    
+    try:
+        # ۱. استخراج یوزرنیم‌ها از جدول پیام‌ها
+        res = supabase_client.table('messages').select('username').eq('chat_id', chat_id).neq('is_bot', True).execute()
+        usernames_set = set()
+        
+        if res.data:
+            for m in res.data:
+                u = m.get('username')
+                if u and not u.startswith('none') and u != 'bot':
+                    usernames_set.add(u)
+
+        # ۲. بررسی آیا اعضای خاموش دستی در حافظه ذخیره شده‌اند؟
+        try:
+            mem_res = supabase_client.table('bot_memory').select('value').eq('key', 'silent_members').execute()
+            if mem_res.data:
+                extra_users = mem_res.data[0]['value'].replace('@', '').split()
+                for u in extra_users:
+                    usernames_set.add(u.strip().lower())
+        except Exception:
+            pass
+
+        if not usernames_set:
+            await update.message.reply_text("عضوی برای تگ کردن یافت نشد.")
+            return
+
+        usernames = list(usernames_set)
+        
+        # تقسیم به بخش‌های ۱۵ تایی برای جلوگیری از لیمیت پیام
+        chunks = [usernames[i:i + 15] for i in range(0, len(usernames), 15)]
+        
+        for chunk in chunks:
+            mentions = " ".join([f"@{u}" for u in chunk])
+            full_msg = f"📢 **{custom_text}**\n\n{mentions}"
+            bot_msg = await context.bot.send_message(chat_id=chat_id, text=full_msg, parse_mode='Markdown')
+            await save_bot_message(chat_id, bot_msg.message_id)
+
+    except Exception as e:
+        logging.error(f"Error in tag_all: {e}")
+
 async def disable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ai_enabled
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
-    
     ai_enabled = False
-    bot_msg = await update.message.reply_text("🛑 هوش مصنوعی (فیلتر و چت) *خاموش* شد. سایر دستورات ربات فعال هستند.", parse_mode='Markdown')
+    bot_msg = await update.message.reply_text("🛑 هوش مصنوعی *خاموش* شد.", parse_mode='Markdown')
     await save_bot_message(chat_id, bot_msg.message_id)
 
 async def enable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ai_enabled
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
-    
     ai_enabled = True
     bot_msg = await update.message.reply_text("✅ هوش مصنوعی *روشن* شد.", parse_mode='Markdown')
     await save_bot_message(chat_id, bot_msg.message_id)
 
-# مدیریت پیام‌های گروه
+# --- هندلر پیام‌ها و تصاویر ---
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
@@ -146,12 +241,12 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = (update.effective_user.username or update.effective_user.first_name).lower() 
     message_id = update.message.message_id
-    text = update.message.text or ""
+    text = update.message.text or update.message.caption or ""
 
-    # ۱. ذخیره پیام جدید در دیتابیس
+    # ۱. ذخیره پیام
     await save_message(user_id, username, chat_id, message_id, text)
 
-    # ۲. بررسی وضعیت میوت بودن
+    # ۲. بررسی وضعیت میوت
     try:
         mute_res = supabase_client.table('muted_users').select('until_timestamp').eq('chat_id', chat_id).eq('user_id', user_id).execute()
         if mute_res.data:
@@ -164,106 +259,111 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Error checking mute: {e}")
 
-    # ۳. فیلتر کلمات رکیک در پایتون
+    # ۳. فیلتر کلمات رکیک
     if text:
         bad_words = ["کیر", "کون", "کص", "ک.ی.ر", "ک.و.ن", "ک.ص", "ک.یر", "کی.ر", "ک.ر"]
         text_no_spaces = text.replace(".", "")
-        
         for bw in bad_words:
             if bw in text_no_spaces:
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                    logging.info(f"Deleted by local bad word filter: {message_id}")
+                    logging.info(f"Deleted bad word message: {message_id}")
                 except Exception as e:
-                    logging.error(f"Failed to delete bad word message: {e}")
+                    logging.error(f"Failed to delete bad word: {e}")
                 return 
 
-    # ۴. تشخیص وضعیت صدا زدن یا ریپلای
+    # ۴. تشخیص صدا زدن یا ریپلای
     is_reply_to_bot = False
     replied_text = ""
     if update.message.reply_to_message:
         if update.message.reply_to_message.from_user and update.message.reply_to_message.from_user.id == context.bot.id:
             is_reply_to_bot = True
-        replied_text = update.message.reply_to_message.text or ""
+        replied_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
 
     has_trigger_word = "غالب" in text or "گالب" in text
+    has_photo = bool(update.message.photo)
 
-    # ۵. پاسخ هوشمند با حافظه زمانی که ربات صدا زده می‌شود
-    if ai_enabled and (is_reply_to_bot or has_trigger_word):
+    # ۵. پاسخ هوش مصنوعی
+    if ai_enabled and (is_reply_to_bot or has_trigger_word or (has_photo and is_reply_to_bot)):
         try:
-            # استخراج چند پیام آخر گروه از دیتابیس برای حافظه زمینه‌ای
+            # دریافت تاریخچه چند پیام اخیر
             history_context = ""
             try:
-                recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(11).execute()
+                recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(10).execute()
                 if recent_msgs.data:
-                    # معکوس کردن لیست تا پیام‌ها به ترتیب زمانی باشند
                     chat_history = [f"@{m['username']}: {m['text']}" for m in reversed(recent_msgs.data) if m.get('text')]
                     history_context = "\n".join(chat_history)
             except Exception as e:
                 logging.warning(f"Failed to fetch history: {e}")
 
-            system_instruction = """تو «غالب» هستی؛ یک دستیار هوش مصنوعی بسیار باهوش، خوش‌برخورد، صمیمی، نکته‌سنج، حاضر‌جواب و کمی شوخ‌طبع (دقیقاً مثل هوش مصنوعی میرا در تلگرام) برای گروه چت «غالبون».
-سازنده و خالق تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با آن‌ها با نهایت احترام و صمیمیت صحبت کن.
+            # دریافت حافظه ماندگار
+            permanent_knowledge = get_permanent_memories()
 
-دستورالعمل‌های حیاتی:
-۱. فقط و فقط به زبان فارسی طبیعی، محاوره‌ای و روان پاسخ بده. اصلاً از کاراکترها یا کلمات غیرفارسی استفاده نکن. تنها اگر نیاز به گفتن اصطلاحی شد از بقیه زبان ها استفاده کن.
-۲. حتماً پاسخ خود را دقیقاً با این فرمت آغاز کن: [REACTION: 💡] و به جای لامپ یک ایموجی کاملاً متناسب با حس پیام بگذار.
-۳. تو به تاریخچه پیام‌های قبلی دسترسی داری؛ اگر کاربر به پیامی ارجاع داده یا سوال قبلی را ادامه داده، از سابقه استفاده کن تا پاسخ پیوسته و هوشمندانه باشد.
-۴. پاسخ‌ها کوتاه، گیرا، دوستانه و پرانرژی باشند.
+            system_instruction = f"""تو «غالب» هستی؛ یک هوش مصنوعی بسیار باهوش، فوق‌العاده شوخ‌طبع، حاضر‌جواب، صمیمی و نکته‌سنج (دقیقاً مثل هوش مصنوعی میرا در تلگرام) برای گروه «غالبون».
+سازنده تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با آنها بسیار محترمانه و خودمانی صحبت کن.
+
+اطلاعات و حافظه دائمی تو درباره اعضا و قوانین:
+{permanent_knowledge}
+
+دستورالعمل‌های کلیدی:
+۱. فقط و فقط به زبان فارسی طبیعی و عامیانه/محاوره‌ای صحبت کن.
+۲. حتماً پاسخ خود را دقیقاً با فرمت [REACTION: 💡] آغاز کن و یک ایموجی متناسب بگذار.
+۳. اگر تصویری ارسال شد، تصویر را به دقت تحلیل کن و با طنز و تیزبینی به آن واکنش نشان بده.
+۴. پاسخ‌ها کوتاه، پرانرژی و جذاب باشند.
 """
 
-            # ساخت پرامپت یکپارچه همراه با حافظه و پیام ریپلای‌شده
-            full_prompt = f"{system_instruction}\n\n"
+            # آماده‌سازی ورودی برای Gemini
+            prompt_parts = [system_instruction]
             if history_context:
-                full_prompt += f"--- تاریخچه چند پیام اخیر گروه ---\n{history_context}\n\n"
+                prompt_parts.append(f"--- تاریخچه پیام‌های اخیر گروه ---\n{history_context}")
             if replied_text:
-                full_prompt += f"--- پیامی که کاربر به آن ریپلای کرده ---\n{replied_text}\n\n"
-            full_prompt += f"--- پیام فعلی کاربر ({username}) ---\n{text}"
+                prompt_parts.append(f"--- پیامی که به آن ریپلای شده ---\n{replied_text}")
+            
+            prompt_parts.append(f"--- پیام فعلی کاربر ({username}) ---\n{text if text else '[ارسال تصویر]'}")
 
-            # فراخوانی مدل پرسرعت و سبک Gemini 3.5 Flash-Lite
+            # بررسی تصویر
+            if has_photo:
+                photo_file = await update.message.photo[-1].get_file()
+                photo_bytes = await photo_file.download_as_bytearray()
+                image_part = types.Part.from_bytes(data=bytes(photo_bytes), mime_type="image/jpeg")
+                prompt_parts.append(image_part)
+
+            # ارسال به مدل چندوجهی جمینای
             interaction = gemini_client.interactions.create(
                 model="gemini-3.5-flash-lite",
-                input=full_prompt
+                input=prompt_parts
             )
-            
+
             ai_response = interaction.output_text.strip() if interaction.output_text else ""
 
-            # استخراج ری‌اکشن
+            # استخراج و اعمال ری‌اکشن
             reaction_match = re.search(r'\[REACTION:\s*(.+?)\]', ai_response)
             reaction_emoji = "🤖"
-            
             if reaction_match:
                 reaction_emoji = reaction_match.group(1).strip()
                 ai_response = ai_response.replace(reaction_match.group(0), "").strip()
-                
-            # اعمال ری‌اکشن
+
             try:
-                await context.bot.set_message_reaction(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    reaction=reaction_emoji
-                )
-            except Exception as e:
-                logging.warning(f"Failed to set reaction: {e}")
+                await context.bot.set_message_reaction(chat_id=chat_id, message_id=message_id, reaction=reaction_emoji)
+            except Exception:
+                pass
 
             current_time = time.time()
-            last_time = ghaleb_last_reply.get(user_id, 0) 
-            
-            # ارسال پاسخ به کاربر
-            if current_time - last_time > 10 and ai_response:
+            last_time = ghaleb_last_reply.get(user_id, 0)
+            if current_time - last_time > 8 and ai_response:
                 bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
                 await save_bot_message(chat_id, bot_msg.message_id)
                 ghaleb_last_reply[user_id] = current_time
 
         except Exception as e:
-            logging.error(f"Gemini API Error: {e}")
-            
-# آمار و ارقام
+            logging.error(f"Gemini Processing Error: {e}")
+
+# --- دستورات مدیریتی و آماری ---
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        response = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).execute()
-        msg = await update.message.reply_text(f"📊 تعداد کل پیام‌ های ثبت‌ شده: {response.count}")
+        res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).execute()
+        msg = await update.message.reply_text(f"📊 تعداد کل پیام‌ های ثبت‌ شده: {res.count}")
         await save_bot_message(chat_id, msg.message_id)
     except Exception as e:
         logging.error(f"Error count_group: {e}")
@@ -280,35 +380,28 @@ async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).eq('user_id', user_id).execute()
             bot_msg = await update.message.reply_text(f"👤 شما {res.count} پیام داده‌اید.")
         await save_bot_message(chat_id, bot_msg.message_id)
-    except Exception:
-        pass
+    except Exception: pass
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        response = supabase_client.table('messages').select('username').eq('chat_id', chat_id).neq('is_bot', True).execute()
-        messages = response.data
-        if not messages: return
-        
+        res = supabase_client.table('messages').select('username').eq('chat_id', chat_id).neq('is_bot', True).execute()
+        if not res.data: return
         from collections import Counter
-        counts = Counter(m['username'] for m in messages if m['username'])
+        counts = Counter(m['username'] for m in res.data if m['username'])
         top_users = counts.most_common(5)
-
-        report = f"📈 **آمار گروه:**\n\n💬 تعداد کل پیام‌ ها: {len(messages)}\n\n🏆 **۵ کاربر فعال برتر:**\n"
+        report = f"📈 **آمار گروه:**\n\n💬 تعداد کل پیام‌ ها: {len(res.data)}\n\n🏆 **۵ کاربر فعال برتر:**\n"
         for i, (u, c) in enumerate(top_users, 1):
             report += f"{i}. @{u} : {c} پیام\n"
-
         msg = await update.message.reply_text(report, parse_mode='Markdown')
         await save_bot_message(chat_id, msg.message_id)
     except Exception as e:
         logging.error(f"Error stats: {e}")
 
-# مدیریت پیام‌ها و کاربران
 async def delete_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
     if not context.args or not context.args[0].isdigit(): return
-        
     limit = min(int(context.args[0]), 1000)
     try:
         res = supabase_client.table('messages').select('id, message_id').eq('chat_id', chat_id).order('timestamp', desc=True).limit(limit).execute()
@@ -327,10 +420,8 @@ async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
     if len(context.args) < 2 or not context.args[1].isdigit(): return
-        
     target = context.args[0].replace('@', '').lower()
     limit = min(int(context.args[1]), 1000)
-        
     try:
         res = supabase_client.table('messages').select('id, message_id').eq('chat_id', chat_id).eq('username', target).order('timestamp', desc=True).limit(limit).execute()
         deleted_count = 0
@@ -348,12 +439,10 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
     if len(context.args) < 1: return
-
     target = context.args[0]
     user_id = await get_user_id_by_username(target)
     if not user_id: return
 
-    # سیستم تله‌ی کارت برگردان! مجازات برای کسی که بخواهد خالق را سکوت کند.
     if user_id == 1514414705:
         punisher_id = update.effective_user.id
         until_timestamp = int(time.time()) + 3600
@@ -362,13 +451,11 @@ async def mute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             punished_mutes[punisher_id] = until_timestamp
             bot_msg = await update.message.reply_text("❌ قصد داشتی خالق من رو محدود کنی؟ حالا خودت ۱ ساعت سکوت می کنی و فقط حاجی‌ زاده می‌ تونه آزادت کنه!")
             await save_bot_message(chat_id, bot_msg.message_id)
-        except Exception as e:
-            logging.error(f"Error punishing mute: {e}")
+        except Exception: pass
         return
 
     hours = min(int(context.args[1]) if len(context.args) > 1 and context.args[1].isdigit() else 24, 24)
     until_timestamp = int(time.time()) + (hours * 3600)
-
     try:
         supabase_client.table('muted_users').upsert({'chat_id': chat_id, 'user_id': user_id, 'until_timestamp': until_timestamp}).execute()
         bot_msg = await update.message.reply_text(f"✅ کاربر {target} برای {hours} ساعت سکوت شد.")
@@ -379,7 +466,6 @@ async def ban_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
     if len(context.args) < 1: return
-
     target = context.args[0]
     user_id = await get_user_id_by_username(target)
     if not user_id: return
@@ -410,7 +496,6 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS: return
     if len(context.args) < 1: return
-
     target = context.args[0]
     user_id = await get_user_id_by_username(target)
     if not user_id: return
@@ -423,34 +508,33 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         supabase_client.table('muted_users').delete().eq('chat_id', chat_id).eq('user_id', user_id).execute()
-        
         await context.bot.restrict_chat_member(
             chat_id=chat_id, user_id=user_id,
             permissions=ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_other_messages=True)
         )
-        
         bot_msg = await update.message.reply_text(f"✅ تمام محدودیت‌ های {target} برداشته شد.")
         await save_bot_message(chat_id, bot_msg.message_id)
-        
-        if user_id in punished_mutes:
-            del punished_mutes[user_id]
-        if user_id in punished_media_bans:
-            del punished_media_bans[user_id]
+        if user_id in punished_mutes: del punished_mutes[user_id]
+        if user_id in punished_media_bans: del punished_media_bans[user_id]
     except Exception: pass
 
 if __name__ == '__main__':
-    # ۱. اجرای وب‌سرور در یک ترد مجزا برای زنده نگه داشتن پورت در Render
+    # اجرای وب‌سرور برای زنده نگه‌داشتن کانتینر
     web_thread = threading.Thread(target=run_health_check_server, daemon=True)
     web_thread.start()
 
-    # ۲. راه‌اندازی اپلیکیشن ربات تلگرام/بله
+    # ساخت اپلیکیشن
     application = ApplicationBuilder().token(TOKEN).base_url(BALE_BASE_URL).build()
 
+    # ثبت هندلرها
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("remember", remember_command))
+    application.add_handler(CommandHandler("forget", forget_command))
+    application.add_handler(CommandHandler("memories", memories_command))
+    application.add_handler(CommandHandler("tagall", tag_all))
     application.add_handler(CommandHandler("ai_off", disable_ai))
     application.add_handler(CommandHandler("ai_on", enable_ai))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     application.add_handler(CommandHandler("count_group", count_group))
     application.add_handler(CommandHandler("count_user", count_user))
     application.add_handler(CommandHandler("delete_last", delete_last))
@@ -459,6 +543,9 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("mute", mute_user))
     application.add_handler(CommandHandler("ban_media", ban_media))
     application.add_handler(CommandHandler("unmute", unmute_user))
+
+    # پشتیبانی از پیام‌های متنی و تصاویر
+    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_messages))
 
     logging.info("Starting bot in POLLING mode. Press Ctrl+C to stop.")
     application.run_polling()
