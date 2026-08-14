@@ -6,6 +6,7 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
+import httpx
 
 from telegram import Update, ChatPermissions
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -122,7 +123,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔸 **دستورات ادمین:**
 /remember [موضوع] : [توضیحات] - سپردن نکته دائمی به حافظه ربات
 /forget [موضوع] - پاک کردن موضوع از حافظه
-/tagall [متن] - صدا زدن همگانی همه اعضای گروه
+/tagall [متن] - صدا زدن همگانی همه اعضا بر اساس شناسه کاربری
 /mute [username] [hours] - سکوت کاربر برای زمان مشخص
 /unmute [username] - رفع سکوت کاربر
 /ban_media [username] - بستن ارسال عکس/فیلم/استیکر
@@ -170,6 +171,7 @@ async def memories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"📋 **حافظه و اطلاعات ماندگار من:**\n\n{mems}", parse_mode='Markdown')
     await save_bot_message(chat_id, msg.message_id)
 
+# تگ کردن حرفه‌ای همه اعضا بر اساس شناسه عددی (User ID)
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS:
@@ -178,43 +180,43 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     custom_text = " ".join(context.args) if context.args else "توجه همگی!"
     
     try:
-        # ۱. استخراج یوزرنیم‌ها از جدول پیام‌ها
-        res = supabase_client.table('messages').select('username').eq('chat_id', chat_id).neq('is_bot', True).execute()
-        usernames_set = set()
+        # ۱. دریافت آیدی و نام کاربران از پیام‌های ذخیره شده در دیتابیس
+        res = supabase_client.table('messages').select('user_id, username').eq('chat_id', chat_id).neq('is_bot', True).execute()
         
+        users_dict = {} # key: user_id, value: display_name
         if res.data:
-            for m in res.data:
-                u = m.get('username')
-                if u and not u.startswith('none') and u != 'bot':
-                    usernames_set.add(u)
+            for row in res.data:
+                u_id = row.get('user_id')
+                u_name = row.get('username') or "کاربر"
+                if u_id and u_id > 0:
+                    users_dict[u_id] = u_name
 
-        # ۲. بررسی آیا اعضای خاموش دستی در حافظه ذخیره شده‌اند؟
-        try:
-            mem_res = supabase_client.table('bot_memory').select('value').eq('key', 'silent_members').execute()
-            if mem_res.data:
-                extra_users = mem_res.data[0]['value'].replace('@', '').split()
-                for u in extra_users:
-                    usernames_set.add(u.strip().lower())
-        except Exception:
-            pass
-
-        if not usernames_set:
+        if not users_dict:
             await update.message.reply_text("عضوی برای تگ کردن یافت نشد.")
             return
 
-        usernames = list(usernames_set)
-        
-        # تقسیم به بخش‌های ۱۵ تایی برای جلوگیری از لیمیت پیام
-        chunks = [usernames[i:i + 15] for i in range(0, len(usernames), 15)]
-        
+        # ساخت لیست منشن با Markdown بر اساس شناسه عددی
+        mention_list = []
+        for u_id, u_name in users_dict.items():
+            # تمیزکاری کاراکترهای مخرب Markdown در نام
+            clean_name = re.sub(r'[_*\[\]()~`>#+\-=|{}.!]', '', u_name) or f"کاربر {u_id}"
+            mention_list.append(f"[{clean_name}](tg://user?id={u_id})")
+
+        # ارسال در دسته‌های ۱۰ تایی برای جلوگیری از ارور محدودیت پلتفرم
+        chunks = [mention_list[i:i + 10] for i in range(0, len(mention_list), 10)]
         for chunk in chunks:
-            mentions = " ".join([f"@{u}" for u in chunk])
-            full_msg = f"📢 **{custom_text}**\n\n{mentions}"
-            bot_msg = await context.bot.send_message(chat_id=chat_id, text=full_msg, parse_mode='Markdown')
+            mentions_str = " ، ".join(chunk)
+            full_msg = f"📢 **{custom_text}**\n\n{mentions_str}"
+            bot_msg = await context.bot.send_message(
+                chat_id=chat_id, 
+                text=full_msg, 
+                parse_mode='Markdown'
+            )
             await save_bot_message(chat_id, bot_msg.message_id)
 
     except Exception as e:
         logging.error(f"Error in tag_all: {e}")
+        await update.message.reply_text(f"خطا در تگ همگانی: {e}")
 
 async def disable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ai_enabled
@@ -232,19 +234,20 @@ async def enable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_msg = await update.message.reply_text("✅ هوش مصنوعی *روشن* شد.", parse_mode='Markdown')
     await save_bot_message(chat_id, bot_msg.message_id)
 
-# --- هندلر پیام‌ها و تصاویر ---
+# --- هندلر پیام‌ها، عکس‌ها و هوش مصنوعی ---
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_chat or not update.effective_user:
         return
 
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
+    display_title = update.effective_user.first_name or update.effective_user.username or "کاربر"
     username = (update.effective_user.username or update.effective_user.first_name).lower() 
     message_id = update.message.message_id
     text = update.message.text or update.message.caption or ""
 
     # ۱. ذخیره پیام
-    await save_message(user_id, username, chat_id, message_id, text)
+    await save_message(user_id, display_title, chat_id, message_id, text if text else "[تصویر/مدیا]")
 
     # ۲. بررسی وضعیت میوت
     try:
@@ -272,21 +275,18 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logging.error(f"Failed to delete bad word: {e}")
                 return 
 
-    # ۴. تشخیص صدا زدن یا ریپلای و بررسی عکس
+    # ۴. بررسی عکس و ریپلای
     is_reply_to_bot = False
     replied_text = ""
     target_photo = None
 
-    # اگر روی پیامی ریپلای شده باشد
     if update.message.reply_to_message:
         if update.message.reply_to_message.from_user and update.message.reply_to_message.from_user.id == context.bot.id:
             is_reply_to_bot = True
         replied_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
-        # اگر پیامی که به آن ریپلای شده عکس دارد
         if update.message.reply_to_message.photo:
             target_photo = update.message.reply_to_message.photo[-1]
 
-    # اگر پیام فعلی خودش عکس دارد
     if update.message.photo:
         target_photo = update.message.photo[-1]
 
@@ -296,63 +296,66 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ۵. پاسخ هوش مصنوعی
     if ai_enabled and (is_reply_to_bot or has_trigger_word or (has_photo and is_reply_to_bot)):
         try:
-            # دریافت تاریخچه چند پیام اخیر
+            # دریافت سابقه پیام‌های گروه
             history_context = ""
             try:
-                recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(10).execute()
+                recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(8).execute()
                 if recent_msgs.data:
                     chat_history = []
                     for m in reversed(recent_msgs.data):
-                        msg_t = m.get('text') if m.get('text') else "[عکس/رسانه]"
-                        chat_history.append(f"@{m['username']}: {msg_t}")
+                        msg_t = m.get('text') or "[مدیا]"
+                        chat_history.append(f"{m['username']}: {msg_t}")
                     history_context = "\n".join(chat_history)
             except Exception as e:
                 logging.warning(f"Failed to fetch history: {e}")
 
-            # دریافت حافظه ماندگار
             permanent_knowledge = get_permanent_memories()
 
             system_instruction = f"""تو «غالب» هستی؛ دستیار هوش مصنوعی هوشمند، کاردرست، محترم و خوش‌برخورد برای گروه «غالبون».
-سازنده و برنامه‌نویس تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با مدیران و اعضا با ادب، احترام و لحنی متین صحبت کن.
+سازنده و برنامه‌نویس تو «محمد مهدی حاجی زاده» (@mmhajizadeh) است و مدیران گروه «شادکام» و «عشقی» هستند. با مدیران و اعضا با ادب، احترام و لحنی متین و نیمه‌صمیمی صحبت کن.
 
 اطلاعات و حافظه دائمی تو درباره اعضا و قوانین:
 {permanent_knowledge}
 
-دستورالعمل‌های حیاتی برای لحن و پاسخ:
-۱. زبان پاسخ فقط فارسی روان، سلیس و نیمه‌محاوره‌ای (محترمانه اما صمیمی) باشد.
-۲. شوخ‌طبعی و صمیمیت را بسیار ملایم، زیرپوستی و اندازه نگه دار؛ به هیچ وجه در شوخی زیاده‌روی نکن.
-۳. حتماً در ابتدای پاسخ دقیقاً یک ایموجی متناسب با حس پیام در قالب [REACTION: 💡] بگذار.
-۴. اگر تصویری ارسال شده یا به تصویری اشاره شده، دقیقاً المان‌های داخل تصویر را با نکته‌سنجی و ادب تحلیل کن.
-۵. پاسخ‌ها مختصر، شسته‌رفته و مفید باشند.
+دستورالعمل‌های حیاتی:
+۱. فقط و فقط به زبان فارسی سلیس و روان پاسخ بده.
+۲. شوخ‌طبعی و صمیمیت را بسیار ملایم و کنترل‌شده نگه دار و اصلاً در شوخی زیاده‌روی نکن.
+۳. حتماً پاسخ خود را دقیقاً با این ساختار آغاز کن: [REACTION: 💡] و به جای لامپ یک ایموجی مناسب بگذار.
+۴. اگر تصویری ارسال شده، تمام جزییات، متن‌ها و عناصر تصویر را دقیق و با متانت تحلیل کن.
+۵. پاسخ‌ها کوتاه، شسته‌رفته و مفید باشند.
 """
 
-            # ساخت متن پیام
+            user_query = text if text else "لطفاً این تصویر را با دقت نگاه کن، تحلیلش کن و نظرت را بگو."
+            
             input_text = f"{system_instruction}\n\n"
             if history_context:
-                input_text += f"--- تاریخچه پیام‌های اخیر گروه ---\n{history_context}\n\n"
+                input_text += f"--- سابقه پیام‌های گروه ---\n{history_context}\n\n"
             if replied_text:
                 input_text += f"--- پیامی که به آن ریپلای شده ---\n{replied_text}\n\n"
-            
-            user_msg_content = text if text else "لطفاً این تصویر را ببین و نظرت را بگو."
-            input_text += f"--- پیام فعلی کاربر ({username}) ---\n{user_msg_content}"
+            input_text += f"--- پیام فعلی کاربر ({display_title}) ---\n{user_query}"
 
-            # دانلود تصویر از سرور بله
+            # دریافت مستقیم بایت‌های تصویر از API بله
             image_bytes = None
             if has_photo and target_photo:
                 try:
-                    import httpx
-                    file_info = await context.bot.get_file(target_photo.file_id)
-                    if file_info.file_path:
-                        async with httpx.AsyncClient() as client:
-                            file_url = f"https://tapi.bale.ai/file/bot{TOKEN}/{file_info.file_path}"
-                            resp = await client.get(file_url)
-                            if resp.status_code == 200:
-                                image_bytes = resp.content
-                                logging.info(f"Photo successfully downloaded ({len(image_bytes)} bytes)")
+                    file_obj = await context.bot.get_file(target_photo.file_id)
+                    file_path = file_obj.file_path
+                    
+                    # هندل کردن ساختار آدرس دانلود فایل در بله
+                    if file_path.startswith("http"):
+                        download_url = file_path
+                    else:
+                        download_url = f"https://tapi.bale.ai/file/bot{TOKEN}/{file_path}"
+                    
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        resp = await client.get(download_url)
+                        if resp.status_code == 200 and len(resp.content) > 0:
+                            image_bytes = resp.content
+                            logging.info(f"Successfully fetched image: {len(image_bytes)} bytes")
                 except Exception as img_err:
-                    logging.warning(f"Image download failed: {img_err}")
+                    logging.error(f"Image fetch failed: {img_err}")
 
-            # آماده‌سازی آرایه ورودی برای Gemini Interactions API
+            # ارسال ورودی به Gemini
             if image_bytes:
                 prompt_input = [
                     types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
@@ -382,7 +385,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             current_time = time.time()
             last_time = ghaleb_last_reply.get(user_id, 0)
-            if current_time - last_time > 5 and ai_response:
+            if current_time - last_time > 4 and ai_response:
                 bot_msg = await update.message.reply_text(ai_response, reply_to_message_id=message_id)
                 await save_bot_message(chat_id, bot_msg.message_id)
                 ghaleb_last_reply[user_id] = current_time
@@ -390,7 +393,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.error(f"Gemini Processing Error: {e}")
 
-# --- دستورات مدیریتی و آماری ---
+# --- دستورات آماری و مدیریتی ---
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
