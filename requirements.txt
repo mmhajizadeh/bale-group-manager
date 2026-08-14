@@ -3,3 +3,4 @@ asyncpg
 python-dotenv
 groq
 supabase
+google-genai
