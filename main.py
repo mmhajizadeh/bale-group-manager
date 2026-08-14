@@ -171,7 +171,7 @@ async def memories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"📋 **حافظه و اطلاعات ماندگار من:**\n\n{mems}", parse_mode='Markdown')
     await save_bot_message(chat_id, msg.message_id)
 
-# تگ کردن همگانی اختصاصی پیام‌رسان بله
+# تگ کردن همگانی اختصاصی پیام‌رسان بله (با لینک مستقیم چت وب و HTML)
 async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if update.effective_user.id not in ALLOWED_USERS:
@@ -180,25 +180,27 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     custom_text = " ".join(context.args) if context.args else "توجه همگی!"
     
     try:
-        # ۱. خواندن تمام کاربران ثبت‌شده در دیتابیس
+        # ۱. دریافت تمام کاربران از دیتابیس
         res = supabase_client.table('messages').select('user_id, username').eq('chat_id', chat_id).neq('is_bot', True).execute()
         
-        users_dict = {}  # user_id: username_or_name
+        users_dict = {}  # user_id: display_name
         if res.data:
             for row in res.data:
                 u_id = row.get('user_id')
                 u_name = row.get('username') or "کاربر"
                 if u_id and int(u_id) > 0:
-                    users_dict[u_id] = u_name
+                    users_dict[int(u_id)] = u_name
 
-        # ۲. اضافه کردن اعضای خاموش ثبت‌شده در حافظه (اگر وجود داشته باشد)
+        # ۲. بررسی اعضای خاموش در حافظه دائمی
         try:
             mem_res = supabase_client.table('bot_memory').select('value').eq('key', 'silent_members').execute()
             if mem_res.data:
                 extra_users = mem_res.data[0]['value'].replace('@', '').split()
-                for u in extra_users:
-                    # به عنوان یوزرنیم بدون آیدی مشخص اضافه می‌شود
-                    users_dict[f"extra_{u}"] = u.strip()
+                for idx, u in enumerate(extra_users):
+                    if u.isdigit():
+                        users_dict[int(u)] = f"کاربر {u}"
+                    else:
+                        users_dict[f"extra_{idx}"] = u.strip()
         except Exception:
             pass
 
@@ -206,33 +208,33 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("عضوی برای تگ کردن در دیتابیس ثبت نشده است.")
             return
 
-        # ۳. ساخت لیست تگ سازگار با بله
+        # ۳. ساخت لینک مستقیم بله با فرمت HTML
         mentions_list = []
         for u_id, name in users_dict.items():
-            clean_name = re.sub(r'[_*\[\]()~`>#+\-=|{}.!]', '', name).strip()
+            # تمیزکاری نام برای تگ HTML
+            safe_name = str(name).replace("<", "").replace(">", "").replace("&", "").strip() or "کاربر"
             
-            # اگر یوزرنیم است
-            if isinstance(u_id, str) and u_id.startswith("extra_"):
-                mentions_list.append(f"@{clean_name}")
+            if isinstance(u_id, int):
+                # لینک استاندارد چت بله
+                mentions_list.append(f'<a href="https://web.bale.ai/chat?uid={u_id}">{safe_name}</a>')
             else:
-                # تگ متنی با لینک پروتکل بله
-                mentions_list.append(f"[{clean_name}](ble://user?id={u_id})")
+                mentions_list.append(f"@{safe_name}")
 
-        # ۴. ارسال دسته‌های ۱۰تایی در بله
+        # ۴. ارسال دسته‌های ۱۰ تایی با parse_mode='HTML'
         chunks = [mentions_list[i:i + 10] for i in range(0, len(mentions_list), 10)]
         for chunk in chunks:
-            mentions_str = "  ".join(chunk)
-            full_msg = f"📢 **{custom_text}**\n\n{mentions_str}"
+            mentions_str = " ، ".join(chunk)
+            full_msg = f"📢 <b>{custom_text}</b>\n\n{mentions_str}"
             bot_msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=full_msg,
-                parse_mode='Markdown'
+                parse_mode='HTML'
             )
             await save_bot_message(chat_id, bot_msg.message_id)
 
     except Exception as e:
         logging.error(f"Error in Bale tag_all: {e}")
-        await update.message.reply_text(f"خطا در اجرای دستور: {e}")
+        await update.message.reply_text(f"خطا در اجرای تگ: {e}")
 
 async def disable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global ai_enabled
