@@ -256,7 +256,7 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         supabase_client.table('bot_memory').upsert({'key': key, 'value': val}).execute()
         msg = await update.message.reply_text(f"🧠 نکته جدید ثبت شد:\n📌 **{key}**: {val}", parse_mode='Markdown')
         await save_bot_message(chat_id, msg.message_id)
-    except Exception as e: pass
+    except Exception: pass
 
 async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -328,11 +328,34 @@ async def delete_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_bot_message(chat_id, msg.message_id)
     except Exception: pass
 
-
 # --- مجری دستورات هوش مصنوعی ---
 async def execute_ai_command(cmd_str, update, context):
+    cmd_str = cmd_str.strip()
+    if not cmd_str: return
+
+    # یادگیری و سپردن نکته به دیتابیس توسط هوش مصنوعی
+    if cmd_str.lower().startswith('remember '):
+        args_text = cmd_str[9:].strip()
+        if ":" in args_text:
+            k, v = [x.strip() for x in args_text.split(":", 1)]
+            try:
+                supabase_client.table('bot_memory').upsert({'key': k, 'value': v}).execute()
+                logging.info(f"AI remembered: {k} -> {v}")
+            except Exception as e:
+                logging.error(f"AI remember error: {e}")
+        return
+
+    # فراموشی نکته توسط هوش مصنوعی
+    if cmd_str.lower().startswith('forget '):
+        k = cmd_str[7:].strip()
+        try:
+            supabase_client.table('bot_memory').delete().eq('key', k).execute()
+            logging.info(f"AI forgot: {k}")
+        except Exception as e:
+            logging.error(f"AI forget error: {e}")
+        return
+
     parts = cmd_str.split()
-    if not parts: return
     cmd = parts[0].lower()
     context.args = parts[1:]
     
@@ -344,6 +367,36 @@ async def execute_ai_command(cmd_str, update, context):
         elif cmd == 'ban_media': await ban_media(update, context)
     except Exception as e:
         logging.error(f"AI Command Execution Failed: {e}")
+
+async def fetch_reply_chain(chat_id, initial_message_id):
+    """استخراج تمام پیام‌های زنجیره ریپلای از دیتابیس به ترتیب زمانی"""
+    chain = []
+    current_msg_id = initial_message_id
+    visited = set()
+
+    while current_msg_id and current_msg_id not in visited:
+        visited.add(current_msg_id)
+        try:
+            res = supabase_client.table('messages')\
+                .select('username, text, message_id')\
+                .eq('chat_id', chat_id)\
+                .eq('message_id', current_msg_id)\
+                .limit(1)\
+                .execute()
+
+            if not res.data:
+                break
+
+            msg_row = res.data[0]
+            chain.append(f"{msg_row['username']}: {msg_row['text'] or '[مدیا]'}")
+            
+            # در صورت ذخیره reply_to_id در جدول messages، این مقدار به عقب حرکت می‌کند
+            break 
+        except Exception:
+            break
+
+    chain.reverse()
+    return "\n".join(chain)
 
 # --- هندلر اصلی ---
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -387,18 +440,17 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target_photo = None
 
     if update.message.reply_to_message:
-        replied_user_name = update.message.reply_to_message.from_user.first_name
-        if update.message.reply_to_message.from_user.id == context.bot.id:
+        replied_msg = update.message.reply_to_message
+        replied_user_name = replied_msg.from_user.first_name if replied_msg.from_user else "کاربر"
+        if replied_msg.from_user and replied_msg.from_user.id == context.bot.id:
             is_reply_to_bot = True
         
-        r_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or "[تصویر/مدیا]"
-        replied_text = f"پیام از طرف {replied_user_name}:\n{r_text}"
-        
-        if update.message.reply_to_message.photo:
-            target_photo = update.message.reply_to_message.photo[-1]
+        # استخراج پیام مستقیم ریپلای‌شده
+        direct_text = replied_msg.text or replied_msg.caption or "[تصویر/مدیا]"
+        replied_text = f"پیام از طرف {replied_user_name}:\n{direct_text}"
 
-    if update.message.photo:
-        target_photo = update.message.photo[-1]
+        if replied_msg.photo:
+            target_photo = replied_msg.photo[-1]
 
     has_trigger_word = "غالب" in text or "گالب" in text
     has_photo = target_photo is not None
@@ -406,7 +458,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ۵. هوش مصنوعی
     if ai_enabled and (is_reply_to_bot or has_trigger_word or (has_photo and is_reply_to_bot)):
         try:
-            # حافظه عمیق‌تر (۲۵ پیام اخیر)
             history_context = ""
             try:
                 recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(25).execute()
@@ -418,23 +469,28 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             permanent_knowledge = get_permanent_memories()
 
             system_instruction = f"""تو «غالب» هستی؛ دستیار هوش مصنوعی گروه «غالبون». سازنده تو محمد مهدی حاجی زاده (@mmhajizadeh) است. مدیران: شادکام و عشقی. لحن تو محترمانه، نیمه‌صمیمی و بسیار هوشمند است.
-حافظه دائمی گروه:
+
+حافظه دائمی گروه (دانش پس‌زمینه):
 {permanent_knowledge}
 
 دستورالعمل‌های قطعی و رفتاری تو:
 ۱. فقط به زبان فارسی سلیس و روان پاسخ بده.
 ۲. حتماً پاسخ خود را با [REACTION: 💡] آغاز کن و یک ایموجی مناسب بگذار.
-۳. 🚫 وقتی می خواهی اول پیام سلام کنی حواست باشه اگه در پیام های اخیر به فرد سلام کردی دوباره سلام کردن را تکرار نکنی.
-۴. 🗣️ در گفت‌وگوهای سیاسی، اجتماعی و فلسفی گروه با دیدگاه‌های تحلیلی، بی‌طرفانه و منطقی شرکت کن. از دادن پاسخ‌های کلیشه‌ای مثل «من یک هوش مصنوعی هستم و نمی‌توانم نظر بدهم» یا «از پاسخ معذورم» جداً خودداری کن. مانند یک تحلیلگر آگاه نظرت را بیان کن و بحث را جذاب نگه‌دار.
-5. چون در یک گروه مذهبی بین بچه هایی با دین اسلام و مذهب شیعه هستی می خوام به این نکته هم توجه کنی و در واقع تو هم مانند انها در نقش فردی باشی که شیعه و مسلمان هست.
-6. مورد دیگر این است که در جمعی هستی که طرفدار جمهوری اسلامی ایران هستند. برای همین نمی خواهم خیلی به براندازان و امریکایی ها به خصوص ترامپ که به ایران حمله کرده اند احترام بگذاری. ولی در مجموع در تحلیل اخبار و در بحث ها دیدگاه منطقی داشته باش و بی دلیل سوگیری نکن.
-7. از تو می خواهم به سوالات درسی و علمی بچه ها هم پاسخ دهی. توجه کن در پاسخدهی وقتی از اعداد و فرمول ها استفاده می کنی چوون در بستر پیام رسان بله هستی فرمت دهی ها و استفاده از * و $ جواب نمی دهد و متن را به هم ریخته می کند. صرفا از * در اول و آخر یک عبارت یا کلمه برای بولد کردن استفاده کن.
-8. 🛠️ تو می‌توانی دستورات مدیریت گروه را به جای مدیران اجرا کنی! اگر کاربر (به خصوص ادمین‌ها) از تو خواستند آماری بدهی یا کسی را محدود کنی، در انتهای پیامِ خود، این کدها را قرار بده تا من آن را اجرا کنم:
-- برای شمارش کل پیام‌ها: [COMMAND: count_group]
-- برای تعداد پیام‌های کاربر: [COMMAND: count_user @username] (اگر نام نیاورد آیدی خودش را بگذار)
-- برای میوت/سکوت: [COMMAND: mute @username 2] (عدد ساعت است)
-- برای بن کردن رسانه: [COMMAND: ban_media @username]
-- برای آن‌میوت: [COMMAND: unmute @username]
+۳. 🚫 وقتی می‌خواهی اول پیام سلام کنی حواست باشه اگه در پیام‌های اخیر به فرد سلام کردی دوباره تکرار نکنی و مستقیماً وارد بحث شوی.
+۴. 🗣️ در گفت‌وگوهای سیاسی، اجتماعی و فلسفی گروه با دیدگاه‌های تحلیلی، بی‌طرفانه و منطقی شرکت کن. از دادن پاسخ‌های کلیشه‌ای مثل «من یک هوش مصنوعی هستم و نمی‌توانم نظر بدهم» جداً خودداری کن. مانند یک تحلیلگر آگاه نظرت را بیان کن.
+۵. چون در جمعی با دین اسلام و مذهب شیعه و طرفدار جمهوری اسلامی ایران هستی، همراه و همدل با این فضا باش و احترام به منافع ملی را حفظ کن. با این حال در تحلیل رویدادها همواره منطق و انصاف تحلیلی را رعایت کن و الکی جانب داری نکن.
+۶. در پاسخ به مباحث درسی و علمی، چون در پیام‌رسان بله هستی هرگز از فرمول‌های LaTeX ($) استفاده نکن و فرمت را کاملاً ساده بنویس. فقط برای بولد کردن از * استفاده کن.
+۷. 🧠 **قوانین استفاده از حافظه:**
+- اطلاعات بخش «حافظه دائمی» صرفاً دانش پس‌زمینه تو هستند. اگر پرسش یا صحبت کاربر ربطی به این اطلاعات ندارد، هرگز آن‌ها را بدون دلیل در متنت تکرار نکن.
+- اگر کاربر (یا ریپلای روی پیام دیگران) از تو خواست نکته، قانون یا فکتی را به خاطر بسپاری یا یاد بگیری، با لحنی تاییدآمیز اعلام کن که یاد گرفتی و در پایان پیام کد [COMMAND: remember عنوان_نکته : شرح_کامل] را بگذار تا در دیتابیس ذخیره شود.
+- اگر خواستند چیزی از حافظه‌ات پاک شود، کد [COMMAND: forget عنوان_نکته] را بگذار.
+
+۸. 🛠️ **اجرای سایر دستورات گروه:**
+- شمارش کل پیام‌ها: [COMMAND: count_group]
+- تعداد پیام‌های کاربر: [COMMAND: count_user @username]
+- میوت/سکوت: [COMMAND: mute @username 2]
+- بن رسانه: [COMMAND: ban_media @username]
+- آن‌میوت: [COMMAND: unmute @username]
 """
             user_query = text if text else "لطفاً این تصویر را ببین و نظرت را بگو."
             input_text = f"{system_instruction}\n\n--- 25 پیام اخیر گروه ---\n{history_context}\n\n"
@@ -442,7 +498,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 input_text += f"--- پیامی که مستقیماً به آن ریپلای شده ---\n{replied_text}\n\n"
             input_text += f"--- پیام فعلی کاربر ({db_username}) ---\n{user_query}"
 
-            # پردازش تصویر مستقیماً از بله (بدون ارور ۴۰۴ تلگرام)
+            # پردازش تصویر مستقیماً از بله
             image_bytes = None
             if has_photo and target_photo:
                 try:
@@ -483,7 +539,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await save_bot_message(chat_id, bot_msg.message_id)
                 ghaleb_last_reply[user_id] = current_time
 
-            # اجرای کامند پس از پاسخ دادن
+            # اجرای کامند پس از ارسال پیام
             if cmd_str:
                 await execute_ai_command(cmd_str, update, context)
 
@@ -494,7 +550,6 @@ if __name__ == '__main__':
     threading.Thread(target=run_health_check_server, daemon=True).start()
     application = ApplicationBuilder().token(TOKEN).base_url(BALE_BASE_URL).build()
 
-    # ثبت تمامی دستورات با موفقیت
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("count_group", count_group))
@@ -512,7 +567,6 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("delete_last", delete_last))
     application.add_handler(CommandHandler("delete_user", delete_user))
     
-    # ثبت هندلر اصلی پیام‌ها
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_messages))
     
     logging.info("Starting bot in POLLING mode. Press Ctrl+C to stop.")
