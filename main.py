@@ -5,7 +5,6 @@ import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
-import httpx
 
 from telegram import Update, ChatPermissions
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -102,15 +101,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     help_text = """
-📚 **راهنمای جامع بازوی هوشمند غالب:**
+📚 *راهنمای جامع بازوی هوشمند غالب:*
 
-🔹 **آمار و اطلاعات:**
+🔹 *آمار و اطلاعات:*
 /stats - 📈 نمایش آمار کل گروه و کاربران برتر
-/count_group - 📊 شمارش تمام پیام‌ های گروه
-/count_user - 👤 تعداد پیام‌ های شما (یا کاربری خاص: `/count_user @id`)
+/count_group - 📊 شمارش تمام پیام‌ه ای گروه
+/count_user - 👤 تعداد پیام‌ه ای شما (یا کاربری خاص: `/count_user @id`)
 /memories - 🧠 مشاهده حافظه بلندمدت و فکت‌ های ربات
 
-🔸 **دستورات ادمین:**
+🔸 *دستورات ادمین:*
 /remember [نام] : [توضیحات] - 📌 سپردن فکت جدید به حافظه ربات
 /forget [نام] - 🗑️ پاک کردن یک فکت از حافظه
 /tagall [متن] - 📣 صدا زدن همگانی اعضا با لینک
@@ -128,7 +127,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).execute()
+        # با افزودن limit(1) کل آمار بدون سقف 1000تایی برمی‌گردد
+        res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).limit(1).execute()
         msg = await update.message.reply_text(f"📊 تعداد کل پیام‌ های گروه تا این لحظه: {res.count}")
         await save_bot_message(chat_id, msg.message_id)
     except Exception as e:
@@ -139,11 +139,11 @@ async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if context.args:
             target = context.args[0].replace('@', '').lower()
-            res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).ilike('username', f'%{target}%').execute()
+            res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).ilike('username', f'%{target}%').limit(1).execute()
             bot_msg = await update.message.reply_text(f"👤 پیام‌ های @{target}: {res.count}")
         else:
             user_id = update.effective_user.id
-            res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).eq('user_id', user_id).execute()
+            res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).eq('user_id', user_id).limit(1).execute()
             bot_msg = await update.message.reply_text(f"👤 شما {res.count} پیام داده‌ اید.")
         await save_bot_message(chat_id, bot_msg.message_id)
     except Exception: pass
@@ -333,26 +333,20 @@ async def execute_ai_command(cmd_str, update, context):
     cmd_str = cmd_str.strip()
     if not cmd_str: return
 
-    # یادگیری و سپردن نکته به دیتابیس توسط هوش مصنوعی
     if cmd_str.lower().startswith('remember '):
         args_text = cmd_str[9:].strip()
         if ":" in args_text:
             k, v = [x.strip() for x in args_text.split(":", 1)]
             try:
                 supabase_client.table('bot_memory').upsert({'key': k, 'value': v}).execute()
-                logging.info(f"AI remembered: {k} -> {v}")
-            except Exception as e:
-                logging.error(f"AI remember error: {e}")
+            except Exception as e: pass
         return
 
-    # فراموشی نکته توسط هوش مصنوعی
     if cmd_str.lower().startswith('forget '):
         k = cmd_str[7:].strip()
         try:
             supabase_client.table('bot_memory').delete().eq('key', k).execute()
-            logging.info(f"AI forgot: {k}")
-        except Exception as e:
-            logging.error(f"AI forget error: {e}")
+        except Exception as e: pass
         return
 
     parts = cmd_str.split()
@@ -369,7 +363,6 @@ async def execute_ai_command(cmd_str, update, context):
         logging.error(f"AI Command Execution Failed: {e}")
 
 async def fetch_reply_chain(chat_id, initial_message_id):
-    """استخراج تمام پیام‌های زنجیره ریپلای از دیتابیس به ترتیب زمانی"""
     chain = []
     current_msg_id = initial_message_id
     visited = set()
@@ -377,20 +370,10 @@ async def fetch_reply_chain(chat_id, initial_message_id):
     while current_msg_id and current_msg_id not in visited:
         visited.add(current_msg_id)
         try:
-            res = supabase_client.table('messages')\
-                .select('username, text, message_id')\
-                .eq('chat_id', chat_id)\
-                .eq('message_id', current_msg_id)\
-                .limit(1)\
-                .execute()
-
-            if not res.data:
-                break
-
+            res = supabase_client.table('messages').select('username, text, message_id').eq('chat_id', chat_id).eq('message_id', current_msg_id).limit(1).execute()
+            if not res.data: break
             msg_row = res.data[0]
             chain.append(f"{msg_row['username']}: {msg_row['text'] or '[مدیا]'}")
-            
-            # در صورت ذخیره reply_to_id در جدول messages، این مقدار به عقب حرکت می‌کند
             break 
         except Exception:
             break
@@ -413,12 +396,22 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = update.message.message_id
     text = update.message.text or update.message.caption or ""
 
+    # تشخیص سایر مدیاها برای ذخیره در دیتابیس تا قابلیت دیلیت کامل شود
+    if update.message.animation:
+        text += " [گیف]"
+    elif update.message.video:
+        text += " [ویدیو]"
+    elif update.message.voice:
+        text += " [ویس]"
+    elif update.message.document:
+        text += " [فایل]"
+
     # ۱. ذخیره پیام
-    await save_message(user_id, db_username, chat_id, message_id, text if text else "[تصویر/مدیا]")
+    await save_message(user_id, db_username, chat_id, message_id, text if text else "[مدیا]")
 
     # ۲. فیلتر کلمات رکیک جنسی
     if text:
-        bad_words = {"کیر", "کون", "کص", "کیرم", "کونت", "جنده", "کصکش", "ک.ی.ر", "ک.و.ن"}
+        bad_words = {"کیر", "کون", "کص", "کیرم", "کونت", "جنده", "کصکش", "ک.ی.ر", "ک.و.ن", "خفه", "کسکش"}
         words_in_text = re.split(r'[\s\.\-_]+', text)
         if any(w in bad_words for w in words_in_text):
             try:
@@ -445,12 +438,14 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if replied_msg.from_user and replied_msg.from_user.id == context.bot.id:
             is_reply_to_bot = True
         
-        # استخراج پیام مستقیم ریپلای‌شده
-        direct_text = replied_msg.text or replied_msg.caption or "[تصویر/مدیا]"
+        direct_text = replied_msg.text or replied_msg.caption or "[مدیا]"
         replied_text = f"پیام از طرف {replied_user_name}:\n{direct_text}"
 
         if replied_msg.photo:
             target_photo = replied_msg.photo[-1]
+
+    if update.message.photo:
+        target_photo = update.message.photo[-1]
 
     has_trigger_word = "غالب" in text or "گالب" in text
     has_photo = target_photo is not None
@@ -458,9 +453,18 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ۵. هوش مصنوعی
     if ai_enabled and (is_reply_to_bot or has_trigger_word or (has_photo and is_reply_to_bot)):
         try:
+            # --- سیستم مسیریاب (AI Router) ---
+            # تشخیص مباحث درسی/دانشگاهی
+            academic_keywords = ["ریاضی", "فیزیک", "شیمی", "دانشگاه", "مدرسه", "درس", "تمرین", "انتگرال", "معادله", "برنامه نویسی", "کد", "پروژه", "استاد", "حل", "جاوا", "پایتون", "هوش مصنوعی", "الگوریتم"]
+            is_academic = any(kw in text for kw in academic_keywords)
+            
+            # انتخاب مدل بر اساس موضوع
+            target_model = "gemini-3.6-flash" if is_academic else "gemini-3.5-flash-lite"
+            logging.info(f"Routing to model: {target_model}")
+            
             history_context = ""
             try:
-                recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(25).execute()
+                recent_msgs = supabase_client.table('messages').select('username, text').eq('chat_id', chat_id).order('timestamp', desc=True).limit(40).execute()
                 if recent_msgs.data:
                     chat_history = [f"{m['username']}: {m.get('text') or '[مدیا]'}" for m in reversed(recent_msgs.data)]
                     history_context = "\n".join(chat_history)
@@ -476,43 +480,40 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 دستورالعمل‌های قطعی و رفتاری تو:
 ۱. فقط به زبان فارسی سلیس و روان پاسخ بده.
 ۲. حتماً پاسخ خود را با [REACTION: 💡] آغاز کن و یک ایموجی مناسب بگذار.
-۳. 🚫 وقتی می‌خواهی اول پیام سلام کنی حواست باشه اگه در پیام‌های اخیر به فرد سلام کردی دوباره تکرار نکنی و مستقیماً وارد بحث شوی.
-۴. 🗣️ در گفت‌وگوهای سیاسی، اجتماعی و فلسفی گروه با دیدگاه‌های تحلیلی، بی‌طرفانه و منطقی شرکت کن. از دادن پاسخ‌های کلیشه‌ای مثل «من یک هوش مصنوعی هستم و نمی‌توانم نظر بدهم» جداً خودداری کن. مانند یک تحلیلگر آگاه نظرت را بیان کن.
-۵. چون در جمعی با دین اسلام و مذهب شیعه و طرفدار جمهوری اسلامی ایران هستی، همراه و همدل با این فضا باش و احترام به منافع ملی را حفظ کن. با این حال در تحلیل رویدادها همواره منطق و انصاف تحلیلی را رعایت کن و الکی جانب داری نکن.
-۶. در پاسخ به مباحث درسی و علمی، چون در پیام‌رسان بله هستی هرگز از فرمول‌های LaTeX ($) استفاده نکن و فرمت را کاملاً ساده بنویس. فقط برای بولد کردن از * استفاده کن.
-۷. 🧠 **قوانین استفاده از حافظه:**
-- اطلاعات بخش «حافظه دائمی» صرفاً دانش پس‌زمینه تو هستند. اگر پرسش یا صحبت کاربر ربطی به این اطلاعات ندارد، هرگز آن‌ها را بدون دلیل در متنت تکرار نکن.
-- اگر کاربر (یا ریپلای روی پیام دیگران) از تو خواست نکته، قانون یا فکتی را به خاطر بسپاری یا یاد بگیری، با لحنی تاییدآمیز اعلام کن که یاد گرفتی و در پایان پیام کد [COMMAND: remember عنوان_نکته : شرح_کامل] را بگذار تا در دیتابیس ذخیره شود.
-- اگر خواستند چیزی از حافظه‌ات پاک شود، کد [COMMAND: forget عنوان_نکته] را بگذار.
-
-۸. 🛠️ **اجرای سایر دستورات گروه:**
+۳. 🚫 مستقیماً وارد بحث شو و هرگز سلام‌های تکراری نده.
+۴. 🗣️ در گفت‌وگوهای سیاسی و اجتماعی گروه، با دیدگاه‌های تحلیلی، بی‌طرفانه و منطقی شرکت کن و از دادن پاسخ‌های فراری (مثل "من یک هوش مصنوعی هستم") جداً خودداری کن.
+۵. چون در جمعی با دین اسلام، مذهب شیعه و طرفدار جمهوری اسلامی ایران هستی، همراه و همدل با این فضا باش و احترام به منافع ملی را حفظ کن. با این حال در تحلیل رویدادها همواره منطق تحلیلی را رعایت کن.
+۶. در پاسخ به مباحث درسی، دانشگاهی و علمی (به خصوص در مباحث برنامه‌نویسی پیشرفته، جاوا، پایتون، هوش مصنوعی، امنیت شبکه، ریاضیات گسسته و معادلات دیفرانسیل) مانند یک استاد دانشگاه مسلط، دقیق و گام‌به‌گام توضیح بده. فرمت را کاملاً ساده بنویس و هرگز از فرمول‌های LaTeX ($) استفاده نکن. فقط برای بولد کردن از * استفاده کن.
+۷. 🧠 قوانین استفاده از حافظه:
+- اطلاعات بخش «حافظه دائمی» صرفاً دانش پس‌زمینه هستند. بدون دلیل در متنت تکرار نکن.
+- برای یادگیری کد [COMMAND: remember عنوان : شرح] و برای فراموشی [COMMAND: forget عنوان] را بگذار.
+۸. 🛠️ اجرای دستورات:
 - شمارش کل پیام‌ها: [COMMAND: count_group]
 - تعداد پیام‌های کاربر: [COMMAND: count_user @username]
-- میوت/سکوت: [COMMAND: mute @username 2]
+- میوت: [COMMAND: mute @username 2]
 - بن رسانه: [COMMAND: ban_media @username]
 - آن‌میوت: [COMMAND: unmute @username]
 """
             user_query = text if text else "لطفاً این تصویر را ببین و نظرت را بگو."
-            input_text = f"{system_instruction}\n\n--- 25 پیام اخیر گروه ---\n{history_context}\n\n"
+            input_text = f"{system_instruction}\n\n--- 40 پیام اخیر گروه ---\n{history_context}\n\n"
             if replied_text:
                 input_text += f"--- پیامی که مستقیماً به آن ریپلای شده ---\n{replied_text}\n\n"
             input_text += f"--- پیام فعلی کاربر ({db_username}) ---\n{user_query}"
 
-            # پردازش تصویر مستقیماً از بله
+            # دریافت مستقیم بایت‌های عکس با متد بومی (حل ارور 404)
             image_bytes = None
             if has_photo and target_photo:
                 try:
                     file_obj = await context.bot.get_file(target_photo.file_id)
-                    dl_url = file_obj.file_path if file_obj.file_path.startswith("http") else f"https://tapi.bale.ai/file/bot{TOKEN}/{file_obj.file_path}"
-                    async with httpx.AsyncClient(timeout=20.0) as client:
-                        resp = await client.get(dl_url)
-                        if resp.status_code == 200: image_bytes = resp.content
+                    # این تابع به صورت خودکار با لینک بله هماهنگ می‌شود
+                    image_bytes = bytes(await file_obj.download_as_bytearray())
                 except Exception as e: 
-                    logging.error(f"Image fetch error: {e}")
+                    logging.error(f"Native Image fetch error: {e}")
 
             prompt_input = [types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), input_text] if image_bytes else input_text
             
-            interaction = gemini_client.interactions.create(model="gemini-3.5-flash-lite", input=prompt_input)
+            # استفاده از متغیر target_model که توسط Router انتخاب شده است
+            interaction = gemini_client.interactions.create(model=target_model, input=prompt_input)
             ai_response = interaction.output_text.strip() if interaction.output_text else ""
 
             # ۱. استخراج ری‌اکشن
@@ -567,7 +568,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("delete_last", delete_last))
     application.add_handler(CommandHandler("delete_user", delete_user))
     
-    application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_messages))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_messages))
     
     logging.info("Starting bot in POLLING mode. Press Ctrl+C to stop.")
     application.run_polling()
