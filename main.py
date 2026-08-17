@@ -24,7 +24,7 @@ SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
-# راه‌اندازی کلاینت‌ها
+# راه اندازی کلاینت ها
 supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -36,7 +36,7 @@ ai_enabled = True
 punished_mutes = {}
 punished_media_bans = {}
 
-# --- وب‌سرور برای زنده نگه‌داشتن ربات در رندر ---
+# --- وب سرور برای زنده نگه داشتن ربات در رندر ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
@@ -105,9 +105,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🔹 *آمار و اطلاعات:*
 /stats - 📈 نمایش آمار کل گروه و کاربران برتر
-/count_group - 📊 شمارش تمام پیام‌ه ای گروه
-/count_user - 👤 تعداد پیام‌ه ای شما (یا کاربری خاص: `/count_user @id`)
-/memories - 🧠 مشاهده حافظه بلندمدت و فکت‌ های ربات
+/count_group - 📊 شمارش تمام پیام های گروه
+/count_user - 👤 تعداد پیام های شما (یا کاربری خاص: `/count_user @id`)
+/memories - 🧠 مشاهده حافظه بلندمدت و فکت های ربات
 
 🔸 *دستورات ادمین:*
 /remember [نام] : [توضیحات] - 📌 سپردن فکت جدید به حافظه ربات
@@ -127,9 +127,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def count_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        # با افزودن limit(1) کل آمار بدون سقف 1000تایی برمی‌گردد
         res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).limit(1).execute()
-        msg = await update.message.reply_text(f"📊 تعداد کل پیام‌ های گروه تا این لحظه: {res.count}")
+        msg = await update.message.reply_text(f"📊 تعداد کل پیام های گروه تا این لحظه: {res.count}")
         await save_bot_message(chat_id, msg.message_id)
     except Exception as e:
         logging.error(f"Error count_group: {e}")
@@ -140,25 +139,44 @@ async def count_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.args:
             target = context.args[0].replace('@', '').lower()
             res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).ilike('username', f'%{target}%').limit(1).execute()
-            bot_msg = await update.message.reply_text(f"👤 پیام‌ های @{target}: {res.count}")
+            bot_msg = await update.message.reply_text(f"👤 پیام های @{target}: {res.count}")
         else:
             user_id = update.effective_user.id
             res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).eq('user_id', user_id).limit(1).execute()
-            bot_msg = await update.message.reply_text(f"👤 شما {res.count} پیام داده‌ اید.")
+            bot_msg = await update.message.reply_text(f"👤 شما {res.count} پیام داده اید.")
         await save_bot_message(chat_id, bot_msg.message_id)
     except Exception: pass
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     try:
-        res = supabase_client.table('messages').select('username').eq('chat_id', chat_id).neq('is_bot', True).limit(50000).execute()
-        if not res.data: return
-        from collections import Counter
-        counts = Counter(m['username'].replace('@', '') for m in res.data if m['username'])
-        top_users = counts.most_common(10)
-        report = f"📈 **آمار کل گروه:**\n\n💬 تعداد کل پیام‌ ها: {len(res.data)}\n\n🏆 **کاربران برتر:**\n"
+        total_res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).neq('is_bot', True).limit(1).execute()
+        total_messages = total_res.count if total_res.count is not None else 0
+
+        users_res = supabase_client.table('messages').select('user_id, username').eq('chat_id', chat_id).neq('is_bot', True).execute()
+        
+        user_map = {}
+        if users_res.data:
+            for row in users_res.data:
+                u_id = row.get('user_id')
+                u_name = str(row.get('username') or '').strip().replace('@', '')
+                if u_id and int(u_id) > 0 and u_id not in user_map:
+                    user_map[u_id] = u_name or f"کاربر {u_id}"
+
+        user_counts = []
+        for u_id, name in user_map.items():
+            cnt_res = supabase_client.table('messages').select('id', count='exact').eq('chat_id', chat_id).eq('user_id', u_id).limit(1).execute()
+            count_val = cnt_res.count if cnt_res.count is not None else 0
+            if count_val > 0:
+                user_counts.append((name, count_val))
+
+        user_counts.sort(key=lambda x: x[1], reverse=True)
+        top_users = user_counts[:10]
+
+        report = f"📈 *آمار کل گروه:*\n\n💬 تعداد کل پیام ها: {total_messages}\n\n🏆 *کاربران برتر:*\n"
         for i, (u, c) in enumerate(top_users, 1):
             report += f"{i}. {u} : {c} پیام\n"
+
         msg = await update.message.reply_text(report, parse_mode='Markdown')
         await save_bot_message(chat_id, msg.message_id)
     except Exception as e:
@@ -190,7 +208,7 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         supabase_client.table('muted_users').delete().eq('chat_id', chat_id).eq('user_id', user_id).execute()
         await context.bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_other_messages=True))
-        msg = await update.message.reply_text(f"✅ تمام محدودیت‌ های {target} برداشته شد.")
+        msg = await update.message.reply_text(f"✅ تمام محدودیت های {target} برداشته شد.")
         await save_bot_message(chat_id, msg.message_id)
     except Exception: pass
 
@@ -238,7 +256,7 @@ async def tag_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for idx, chunk in enumerate(chunks):
             mentions_str = "  ".join(chunk)
-            header = f"📢 **{custom_text}**\n\n" if idx == 0 else ""
+            header = f"📢 *{custom_text}*\n\n" if idx == 0 else ""
             bot_msg = await context.bot.send_message(chat_id=chat_id, text=f"{header}{mentions_str}", parse_mode='Markdown')
             await save_bot_message(chat_id, bot_msg.message_id)
     except Exception as e:
@@ -254,9 +272,9 @@ async def remember_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     key, val = [x.strip() for x in full_text.split(":", 1)]
     try:
         supabase_client.table('bot_memory').upsert({'key': key, 'value': val}).execute()
-        msg = await update.message.reply_text(f"🧠 نکته جدید ثبت شد:\n📌 **{key}**: {val}", parse_mode='Markdown')
+        msg = await update.message.reply_text(f"🧠 نکته جدید ثبت شد:\n📌 *{key}*: {val}", parse_mode='Markdown')
         await save_bot_message(chat_id, msg.message_id)
-    except Exception: pass
+    except Exception as e: pass
 
 async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -272,7 +290,7 @@ async def forget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def memories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     mems = get_permanent_memories()
-    msg = await update.message.reply_text(f"📋 **حافظه ماندگار من:**\n\n{mems}", parse_mode='Markdown')
+    msg = await update.message.reply_text(f"📋 *حافظه ماندگار من:*\n\n{mems}", parse_mode='Markdown')
     await save_bot_message(chat_id, msg.message_id)
 
 async def disable_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -396,7 +414,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_id = update.message.message_id
     text = update.message.text or update.message.caption or ""
 
-    # تشخیص سایر مدیاها برای ذخیره در دیتابیس تا قابلیت دیلیت کامل شود
     if update.message.animation:
         text += " [گیف]"
     elif update.message.video:
@@ -453,12 +470,9 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ۵. هوش مصنوعی
     if ai_enabled and (is_reply_to_bot or has_trigger_word or (has_photo and is_reply_to_bot)):
         try:
-            # --- سیستم مسیریاب (AI Router) ---
-            # تشخیص مباحث درسی/دانشگاهی
             academic_keywords = ["ریاضی", "فیزیک", "شیمی", "دانشگاه", "مدرسه", "درس", "تمرین", "انتگرال", "معادله", "برنامه نویسی", "کد", "پروژه", "استاد", "حل", "جاوا", "پایتون", "هوش مصنوعی", "الگوریتم"]
             is_academic = any(kw in text for kw in academic_keywords)
             
-            # انتخاب مدل بر اساس موضوع
             target_model = "gemini-3.6-flash" if is_academic else "gemini-3.5-flash-lite"
             logging.info(f"Routing to model: {target_model}")
             
@@ -472,58 +486,53 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             permanent_knowledge = get_permanent_memories()
 
-            system_instruction = f"""تو «غالب» هستی؛ دستیار هوش مصنوعی گروه «غالبون». سازنده تو محمد مهدی حاجی زاده (@mmhajizadeh) است. مدیران: شادکام و عشقی. لحن تو محترمانه، نیمه‌صمیمی و بسیار هوشمند است.
+            system_instruction = f"""تو «غالب» هستی؛ دستیار هوش مصنوعی گروه «غالبون». سازنده تو محمد مهدی حاجی زاده (@mmhajizadeh) است. مدیران: شادکام و عشقی. لحن تو محترمانه، نیمه صمیمی و بسیار هوشمند است.
 
-حافظه دائمی گروه (دانش پس‌زمینه):
+حافظه دائمی گروه (دانش پس زمینه):
 {permanent_knowledge}
 
-دستورالعمل‌های قطعی و رفتاری تو:
+دستورالعمل های قطعی و رفتاری تو:
 ۱. فقط به زبان فارسی سلیس و روان پاسخ بده.
-۲. حتماً پاسخ خود را با [REACTION: 💡] آغاز کن و یک ایموجی مناسب بگذار.
-۳. 🚫 مستقیماً وارد بحث شو و هرگز سلام‌های تکراری نده.
-۴. 🗣️ در گفت‌وگوهای سیاسی و اجتماعی گروه، با دیدگاه‌های تحلیلی، بی‌طرفانه و منطقی شرکت کن و از دادن پاسخ‌های فراری (مثل "من یک هوش مصنوعی هستم") جداً خودداری کن.
+۲. حتما پاسخ خود را با [REACTION: 💡] آغاز کن و یک ایموجی مناسب بگذار.
+۳. 🚫 مستقیما وارد بحث شو و هرگز سلام های تکراری نده.
+۴. 🗣️ در گفت و گوهای سیاسی و اجتماعی گروه، با دیدگاه های تحلیلی، بی طرفانه و منطقی شرکت کن و از دادن پاسخ های فراری (مثل "من یک هوش مصنوعی هستم") جدا خودداری کن.
 ۵. چون در جمعی با دین اسلام، مذهب شیعه و طرفدار جمهوری اسلامی ایران هستی، همراه و همدل با این فضا باش و احترام به منافع ملی را حفظ کن. با این حال در تحلیل رویدادها همواره منطق تحلیلی را رعایت کن.
-۶. در پاسخ به مباحث درسی، دانشگاهی و علمی (به خصوص در مباحث برنامه‌نویسی پیشرفته، جاوا، پایتون، هوش مصنوعی، امنیت شبکه، ریاضیات گسسته و معادلات دیفرانسیل) مانند یک استاد دانشگاه مسلط، دقیق و گام‌به‌گام توضیح بده. فرمت را کاملاً ساده بنویس و هرگز از فرمول‌های LaTeX ($) استفاده نکن. فقط برای بولد کردن از * استفاده کن.
+۶. در پاسخ به مباحث درسی، دانشگاهی و علمی (به خصوص در مباحث برنامه نویسی پیشرفته، جاوا، پایتون، هوش مصنوعی، امنیت شبکه، ریاضیات گسسته و معادلات دیفرانسیل) مانند یک استاد دانشگاه مسلط، دقیق و گام به گام توضیح بده. فرمت را کاملا ساده بنویس و هرگز از فرمول های LaTeX ($) استفاده نکن. فقط برای بولد کردن از * استفاده کن.
 ۷. 🧠 قوانین استفاده از حافظه:
-- اطلاعات بخش «حافظه دائمی» صرفاً دانش پس‌زمینه هستند. بدون دلیل در متنت تکرار نکن.
+- اطلاعات بخش «حافظه دائمی» صرفا دانش پس زمینه هستند. بدون دلیل در متنت تکرار نکن.
 - برای یادگیری کد [COMMAND: remember عنوان : شرح] و برای فراموشی [COMMAND: forget عنوان] را بگذار.
 ۸. 🛠️ اجرای دستورات:
-- شمارش کل پیام‌ها: [COMMAND: count_group]
-- تعداد پیام‌های کاربر: [COMMAND: count_user @username]
+- شمارش کل پیام ها: [COMMAND: count_group]
+- تعداد پیام های کاربر: [COMMAND: count_user @username]
 - میوت: [COMMAND: mute @username 2]
 - بن رسانه: [COMMAND: ban_media @username]
-- آن‌میوت: [COMMAND: unmute @username]
+- آن میوت: [COMMAND: unmute @username]
 """
-            user_query = text if text else "لطفاً این تصویر را ببین و نظرت را بگو."
+            user_query = text if text else "لطفا این تصویر را ببین و نظرت را بگو."
             input_text = f"{system_instruction}\n\n--- 40 پیام اخیر گروه ---\n{history_context}\n\n"
             if replied_text:
-                input_text += f"--- پیامی که مستقیماً به آن ریپلای شده ---\n{replied_text}\n\n"
+                input_text += f"--- پیامی که مستقیما به آن ریپلای شده ---\n{replied_text}\n\n"
             input_text += f"--- پیام فعلی کاربر ({db_username}) ---\n{user_query}"
 
-            # دریافت مستقیم بایت‌های عکس با متد بومی (حل ارور 404)
             image_bytes = None
             if has_photo and target_photo:
                 try:
                     file_obj = await context.bot.get_file(target_photo.file_id)
-                    # این تابع به صورت خودکار با لینک بله هماهنگ می‌شود
                     image_bytes = bytes(await file_obj.download_as_bytearray())
                 except Exception as e: 
                     logging.error(f"Native Image fetch error: {e}")
 
             prompt_input = [types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), input_text] if image_bytes else input_text
             
-            # استفاده از متغیر target_model که توسط Router انتخاب شده است
             interaction = gemini_client.interactions.create(model=target_model, input=prompt_input)
             ai_response = interaction.output_text.strip() if interaction.output_text else ""
 
-            # ۱. استخراج ری‌اکشن
             reaction_match = re.search(r'\[REACTION:\s*(.+?)\]', ai_response)
             reaction_emoji = "🤖"
             if reaction_match:
                 reaction_emoji = reaction_match.group(1).strip()
                 ai_response = ai_response.replace(reaction_match.group(0), "").strip()
 
-            # ۲. استخراج و اجرای کامند
             command_match = re.search(r'\[COMMAND:\s*(.+?)\]', ai_response)
             cmd_str = None
             if command_match:
@@ -540,7 +549,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await save_bot_message(chat_id, bot_msg.message_id)
                 ghaleb_last_reply[user_id] = current_time
 
-            # اجرای کامند پس از ارسال پیام
             if cmd_str:
                 await execute_ai_command(cmd_str, update, context)
 
