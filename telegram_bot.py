@@ -570,7 +570,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logging.error(f"Gemini Error: {e}")
 
 if __name__ == '__main__':
-    threading.Thread(target=run_health_check_server, daemon=True).start()
+    # threading.Thread(target=run_health_check_server, daemon=True).start()
     
     # حذف BALE_BASE_URL برای اتصال به سرورهای اصلی تلگرام
     application = ApplicationBuilder().token(TOKEN).build()
