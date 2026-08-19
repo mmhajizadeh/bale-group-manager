@@ -19,7 +19,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TOKEN = os.getenv('BALE_BOT_TOKEN')
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
